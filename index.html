@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spectrum</title>
+  <style>
+    /* ============================================================
+       GLOBAL RESET & LAYOUT
+       Keep it simple: full-viewport, no scroll, dark background.
+       ============================================================ */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #0b0e18;
+      color: #c8d0de;
+      font-family: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* -- Top toolbar -- */
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      flex-wrap: wrap;
+    }
+
+    .toolbar-label {
+      font-size: 10px;
+      color: #556;
+      margin-right: 2px;
+    }
+
+    .toolbar-sep {
+      width: 1px;
+      height: 20px;
+      background: rgba(255,255,255,0.08);
+      margin: 0 6px;
+    }
+
+    /* Toolbar buttons */
+    .btn {
+      padding: 6px 14px;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 4px;
+      background: rgba(255,255,255,0.04);
+      color: #8892a4;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: normal;
+      transition: all 0.15s;
+    }
+    .btn:hover {
+      background: rgba(255,255,255,0.08);
+    }
+    .btn.active {
+      border-color: #5af;
+      background: rgba(85,170,255,0.15);
+      color: #7bc4ff;
+      font-weight: bold;
+    }
+
+    /* Resolution and translucency sliders */
+    .slider-input {
+      width: 60px;
+      accent-color: #5af;
+    }
+    .slider-group {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .slider-val {
+      font-size: 10px;
+      color: #7bc4ff;
+      min-width: 28px;
+      text-align: center;
+    }
+
+    /* Intensity mode dropdown */
+    #intensity-select {
+      background: rgba(255,255,255,0.06);
+      color: #8892a4;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-family: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    #intensity-select:focus {
+      outline: none;
+      border-color: #5af;
+    }
+
+    /* -- Canvas container (fills remaining space) -- */
+    #canvas-wrap {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+    #main-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: grab;           /* hint that the canvas is draggable */
+      user-select: none;      /* prevent text selection during drag */
+      -webkit-user-select: none;
+    }
+
+    /* -- Bottom legend bar -- */
+    #legend {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 8px 14px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      font-size: 10px;
+      color: #556;
+      flex-wrap: wrap;
+    }
+    .legend-multi {
+      color: #7bc4ff;
+    }
+
+    /* ---- Loading Overlay ---- */
+    #loading-overlay {
+      display: none;
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(11, 14, 24, 0.82);
+      z-index: 100;
+      justify-content: center;
+      align-items: center;
+      flex-direction: column;
+      gap: 16px;
+    }
+    #loading-overlay.visible {
+      display: flex;
+    }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid rgba(85,170,255,0.2);
+      border-top-color: #5af;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    #loading-msg {
+      font-size: 12px;
+      color: #7bc4ff;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ==================== TOOLBAR ==================== -->
+  <div id="toolbar">
+    <span class="toolbar-label">MODE</span>
+    <button class="btn active" id="btn-raycast" onclick="setMode('raycast')">☀ Raycast</button>
+    <button class="btn" id="btn-particle" onclick="setMode('particle')">≋ Wind Tunnel</button>
+    <button class="btn" id="btn-sightlines" onclick="setMode('sightlines')">⁄ Sight Lines</button>
+
+    <span class="toolbar-sep"></span>
+
+    <span class="toolbar-label">ASSET</span>
+    <button class="btn active" id="btn-SOL" onclick="setAsset('SOL')">SOL</button>
+    <button class="btn" id="btn-ETH" onclick="setAsset('ETH')">ETH</button>
+    <button class="btn" id="btn-BTC" onclick="setAsset('BTC')">BTC</button>
+    <button class="btn" id="btn-overlay" onclick="toggleOverlay()">⊕ Overlay</button>
+
+    <span class="toolbar-sep"></span>
+
+    <button class="btn active" id="btn-candles" onclick="toggleCandles()">◼ Candles</button>
+    <button class="btn active" id="btn-projection" onclick="toggleProjection()">◉ Projection</button>
+
+    <span class="toolbar-sep"></span>
+    <span class="toolbar-label">OVERLAY</span>
+    <button class="btn" id="btn-show-ma"  onclick="toggleOverlayLine('MA')"  style="color:#f0a030;">MA</button>
+    <button class="btn" id="btn-show-rsi" onclick="toggleOverlayLine('RSI')" style="color:#c060f0;">RSI</button>
+    <button class="btn" id="btn-show-lsr" onclick="toggleOverlayLine('LSR')" style="color:#40c0f0;">LSSA</button>
+
+    <div class="slider-group" id="res-group">
+      <span class="toolbar-label">RES</span>
+      <input type="range" class="slider-input" id="res-slider" min="1" max="6" step="1" value="2"
+             oninput="setResolution(+this.value)">
+    </div>
+
+    <div class="slider-group" id="translucency-group">
+      <span class="toolbar-label">OPACITY</span>
+      <input type="range" class="slider-input" id="translucency-slider" min="0" max="100" step="1" value="50"
+             oninput="setTranslucency(+this.value)">
+      <span class="slider-val" id="translucency-val">50%</span>
+    </div>
+
+    <div class="slider-group" id="beam-len-group">
+      <span class="toolbar-label">LENGTH→GLOW</span>
+      <input type="range" class="slider-input" id="beam-len-slider" min="0" max="100" step="5" value="100"
+             oninput="setBeamLenBoost(+this.value)">
+      <span class="slider-val" id="beam-len-val">100%</span>
+    </div>
+
+    <button class="btn" id="btn-rays-only" onclick="toggleRaysOnly()" style="display:none;">◎ Rays Only</button>
+
+    <div class="slider-group" id="beam-spread-group" style="display:none;">
+      <span class="toolbar-label">SPREAD</span>
+      <input type="range" class="slider-input" id="beam-spread-slider" min="0" max="45" step="1" value="15"
+             oninput="setBeamSpread(+this.value)">
+      <span class="slider-val" id="beam-spread-val">15°</span>
+    </div>
+
+    <div class="slider-group" id="intensity-group">
+      <span class="toolbar-label">INTENSITY</span>
+      <select id="intensity-select" onchange="setIntensityMode(this.value)">
+        <option value="none">Uniform</option>
+        <option value="ma_far">MA: Far = Bright</option>
+        <option value="ma_near" selected>MA: Near = Bright</option>
+        <option value="rsi_far">RSI: Extreme = Bright</option>
+        <option value="rsi_near">RSI: Neutral = Bright</option>
+      </select>
+    </div>
+
+    <!-- Sight line mode toggles (only visible in sightlines mode) -->
+    <div id="sl-toggles" style="display:none; align-items:center; gap:6px; flex-wrap:wrap;">
+      <span class="toolbar-sep"></span>
+      <button class="btn active" id="btn-sl-base" onclick="toggleSL('base')">Base Lines</button>
+      <button class="btn" id="btn-sl-rays" onclick="toggleSL('rays')">Extend Rays</button>
+      <button class="btn" id="btn-sl-macro" onclick="toggleSL('macro')">Macro Trends</button>
+      <div class="slider-group">
+        <span class="toolbar-label">ANGLE°</span>
+        <input type="range" class="slider-input" id="macro-angle-slider" min="1" max="10" step="0.5" value="3"
+               oninput="setMacroAngle(+this.value)">
+        <span class="slider-val" id="macro-angle-val">3°</span>
+      </div>
+      <div class="slider-group">
+        <span class="toolbar-label">LENGTH→STRENGTH</span>
+        <input type="range" class="slider-input" id="momentum-slider" min="0" max="100" step="5" value="0"
+               oninput="setMomentum(+this.value)">
+        <span class="slider-val" id="momentum-val">0%</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== DATA SOURCE BAR ==================== -->
+  <div id="data-bar" style="display:flex; align-items:center; gap:8px; padding:6px 14px;
+       border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:wrap;">
+    <span class="toolbar-label">DATA</span>
+    <button class="btn" id="btn-live" onclick="fetchLiveRouter()">⟳ Fetch Live</button>
+    <button class="btn" id="btn-ticker" onclick="toggleLiveTicker()"
+            title="Poll current price every 1-2s and update the last candle">◉ Live Price</button>
+    <button class="btn" id="btn-generated" onclick="useGenerated()">⚡ Generated</button>
+    <span class="toolbar-sep"></span>
+    <span class="toolbar-label">SOURCE</span>
+    <select id="data-source-select" onchange="onDataSourceChange()"
+            style="background:rgba(255,255,255,0.06); color:#8892a4;
+            border:1px solid rgba(255,255,255,0.12); border-radius:4px; padding:4px 8px;
+            font-family:inherit; font-size:11px;">
+      <option value="binance" selected>Binance</option>
+      <option value="coingecko">CoinGecko</option>
+    </select>
+    <!-- CoinGecko API key input — hidden by default, shown when CG is selected -->
+    <span id="cg-key-area" style="display:none;">
+      <input id="cg-key-input" type="password" placeholder="Demo API key"
+             style="background:rgba(255,255,255,0.06); color:#8892a4;
+             border:1px solid rgba(255,255,255,0.12); border-radius:4px; padding:4px 8px;
+             font-family:inherit; font-size:10px; width:140px;"
+             onchange="onCgKeyChange()" />
+      <button id="cg-key-toggle" onclick="toggleCgKeyVisibility()"
+              style="background:none; border:none; color:#556; font-size:10px;
+              cursor:pointer; padding:2px 4px;" title="Show/hide key">👁</button>
+      <a id="cg-key-getlink" href="https://www.coingecko.com/en/api/pricing" target="_blank"
+         style="font-size:9px; color:#5af; text-decoration:none;"
+         title="Sign up for a free CoinGecko Demo API key">get key</a>
+    </span>
+    <span class="toolbar-sep"></span>
+    <span class="toolbar-label">RANGE</span>
+    <select id="interval-select" style="background:rgba(255,255,255,0.06); color:#8892a4;
+            border:1px solid rgba(255,255,255,0.12); border-radius:4px; padding:4px 8px;
+            font-family:inherit; font-size:11px;">
+      <option value="1" selected>24h (5m candles)</option>
+      <option value="1-15m">24h (15m candles)</option>
+      <option value="multi">30d Multi-Res (15m→1h→4h)</option>
+      <option value="7-1h">7d (1h candles)</option>
+      <option value="7">7d (4h candles)</option>
+      <option value="14-1h">14d (1h candles)</option>
+      <option value="14">14d (4h candles)</option>
+      <option value="30">30d (4h candles)</option>
+      <option value="90">90d (daily candles)</option>
+    </select>
+    <span id="data-status" style="font-size:10px; color:#556;">Generated data</span>
+
+    <!-- Zoom indicator: hidden when at 1× / zero pan. Shows current
+         zoom level and a reset button. Lives in the data bar to avoid
+         pushing controls in the top toolbar when it appears. -->
+    <span id="zoom-indicator" style="display:none;">
+      <span class="toolbar-sep"></span>
+      <span class="toolbar-label">ZOOM</span>
+      <span id="zoom-level" style="color:#7bc4ff; font-size:11px; margin-right:4px;">1.0×</span>
+      <button class="btn" id="btn-zoom-reset" onclick="resetZoom(); drawFrame();"
+              title="Reset zoom and pan (or double-click the chart)"
+              style="font-size:10px; padding:4px 8px;">⊘ Reset</button>
+    </span>
+  </div>
+
+  <!-- ==================== ANIMATION BAR ==================== -->
+  <div id="anim-bar" style="display:flex; align-items:center; gap:8px; padding:6px 14px;
+       border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:wrap;">
+    <button class="btn" id="btn-play" onclick="togglePlay()">▶ Play</button>
+    <button class="btn" id="btn-reset" onclick="resetAnim()">⏮ Reset</button>
+    <div class="slider-group">
+      <span class="toolbar-label">SPEED</span>
+      <input type="range" class="slider-input" id="speed-slider" min="1" max="20" step="1" value="20"
+             oninput="setAnimSpeed(+this.value)">
+      <span class="slider-val" id="speed-val">20/s</span>
+    </div>
+    <div class="slider-group" style="flex:1; min-width:120px;">
+      <span class="toolbar-label">PROGRESS</span>
+      <input type="range" style="flex:1; accent-color:#5af;" id="progress-slider" min="1" max="120" step="1" value="120"
+             oninput="scrubAnim(+this.value)">
+      <span class="slider-val" id="progress-val" style="min-width:50px;">120/120</span>
+    </div>
+  </div>
+
+  <!-- ==================== COLOR FORCE BAR ==================== -->
+  <!-- Per-color direction + strength for projection force field.
+       Shown/hidden by updateToolbar() when projection is on. -->
+  <div id="color-force-bar" style="display:none; align-items:center; gap:6px; padding:5px 14px;
+       border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:wrap; font-size:11px;">
+    <span class="toolbar-label">FORCE</span>
+
+    <!-- GREEN -->
+    <span style="color:#1edc5a; font-weight:bold; font-size:10px;">■ GRN</span>
+    <select id="cf-green-dir" style="background:rgba(255,255,255,0.06); color:#8892a4;
+            border:1px solid rgba(255,255,255,0.12); border-radius:3px; padding:2px 4px;
+            font-family:inherit; font-size:10px;" onchange="setColorForce('green','dir',this.value)">
+      <option value="1" selected>▼ Down</option>
+      <option value="-1">▲ Up</option>
+    </select>
+    <input type="range" style="width:40px; accent-color:#1edc5a;" min="0" max="200" step="10" value="100"
+           id="cf-green-str" oninput="setColorForce('green','str',this.value)">
+    <span class="slider-val" id="cf-green-val" style="min-width:20px;">1.0</span>
+
+    <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 2px;"></span>
+
+    <!-- YELLOW -->
+    <span style="color:#f0c828; font-weight:bold; font-size:10px;">■ YEL</span>
+    <select id="cf-yellow-dir" style="background:rgba(255,255,255,0.06); color:#8892a4;
+            border:1px solid rgba(255,255,255,0.12); border-radius:3px; padding:2px 4px;
+            font-family:inherit; font-size:10px;" onchange="setColorForce('yellow','dir',this.value)">
+      <option value="1" selected>▼ Down</option>
+      <option value="-1">▲ Up</option>
+    </select>
+    <input type="range" style="width:40px; accent-color:#f0c828;" min="0" max="200" step="10" value="100"
+           id="cf-yellow-str" oninput="setColorForce('yellow','str',this.value)">
+    <span class="slider-val" id="cf-yellow-val" style="min-width:20px;">1.0</span>
+
+    <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 2px;"></span>
+
+    <!-- BLUE -->
+    <span style="color:#288cff; font-weight:bold; font-size:10px;">■ BLU</span>
+    <select id="cf-blue-dir" style="background:rgba(255,255,255,0.06); color:#8892a4;
+            border:1px solid rgba(255,255,255,0.12); border-radius:3px; padding:2px 4px;
+            font-family:inherit; font-size:10px;" onchange="setColorForce('blue','dir',this.value)">
+      <option value="1">▼ Down</option>
+      <option value="-1" selected>▲ Up</option>
+    </select>
+    <input type="range" style="width:40px; accent-color:#288cff;" min="0" max="200" step="10" value="100"
+           id="cf-blue-str" oninput="setColorForce('blue','str',this.value)">
+    <span class="slider-val" id="cf-blue-val" style="min-width:20px;">1.0</span>
+
+    <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 2px;"></span>
+
+    <!-- RED -->
+    <span style="color:#f03232; font-weight:bold; font-size:10px;">■ RED</span>
+    <select id="cf-red-dir" style="background:rgba(255,255,255,0.06); color:#8892a4;
+            border:1px solid rgba(255,255,255,0.12); border-radius:3px; padding:2px 4px;
+            font-family:inherit; font-size:10px;" onchange="setColorForce('red','dir',this.value)">
+      <option value="1">▼ Down</option>
+      <option value="-1" selected>▲ Up</option>
+    </select>
+    <input type="range" style="width:40px; accent-color:#f03232;" min="0" max="200" step="10" value="100"
+           id="cf-red-str" oninput="setColorForce('red','str',this.value)">
+    <span class="slider-val" id="cf-red-val" style="min-width:20px;">1.0</span>
+  </div>
+
+  <!-- ==================== PREDICTION MODEL BAR ==================== -->
+  <!-- Toggle individual force components on/off. Shown when projection is on. -->
+  <div id="pred-model-bar" style="display:none; align-items:center; gap:8px; padding:5px 14px;
+       border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:wrap; font-size:11px;">
+    <span class="toolbar-label">MODEL</span>
+    <button class="btn active" id="btn-pred-light" onclick="togglePred('Light')" style="font-size:10px; padding:3px 8px;">☀ Light</button>
+    <button class="btn" id="btn-pred-ma"    onclick="togglePred('MA')"    style="font-size:10px; padding:3px 8px;">〰 MA</button>
+    <button class="btn" id="btn-pred-rsi"   onclick="togglePred('RSI')"   style="font-size:10px; padding:3px 8px;">⚡ RSI</button>
+    <button class="btn active" id="btn-pred-vol"   onclick="togglePred('Vol')"   style="font-size:10px; padding:3px 8px;">📊 Volume</button>
+    <button class="btn" id="btn-pred-lsr"   onclick="togglePred('LSR')"   style="font-size:10px; padding:3px 8px;">📈 LSSA</button>
+    <span style="width:1px; height:14px; background:rgba(255,255,255,0.12); margin:0 2px;"></span>
+    <button class="btn" id="btn-pred-calib"   onclick="togglePred('Calib')"   style="font-size:10px; padding:3px 8px;">🔧 Calibrate</button>
+    <button class="btn" id="btn-pred-vbeam"   onclick="togglePred('VBeam')"   style="font-size:10px; padding:3px 8px;">💡 V.Beams</button>
+    <div class="slider-group" id="vbeam-str-group" style="margin-left:-4px;">
+      <input type="range" style="width:40px; accent-color:#ffcc00;" min="0" max="100" step="5" value="50"
+             id="vbeam-str-slider" oninput="setVBeamStr(+this.value)">
+      <span class="slider-val" id="vbeam-str-val" style="min-width:24px;">50%</span>
+    </div>
+    <button class="btn active" id="btn-pred-topo"    onclick="togglePred('Topo')"    style="font-size:10px; padding:3px 8px;">🗺 Topo</button>
+    <button class="btn active" id="btn-pred-corridor" onclick="togglePred('Corridor')" style="font-size:10px; padding:3px 8px;">🫠 Corridor</button>
+    <span style="width:1px; height:14px; background:rgba(255,255,255,0.12); margin:0 2px;"></span>
+    <button class="btn active" id="btn-pred-intrev"   onclick="togglePred('IntRev')"   style="font-size:10px; padding:3px 8px;">💥 Int Rev</button>
+    <button class="btn active" id="btn-pred-minstep"  onclick="togglePred('MinStep')"  style="font-size:10px; padding:3px 8px;">⬇ Min Step</button>
+    <div class="toolbar-sep"></div>
+    <button class="btn" id="btn-contours" onclick="toggleContours()" style="font-size:10px; padding:3px 8px;">◎ Contours</button>
+    <button class="btn" id="btn-contour-fill" onclick="toggleContourFill()" style="font-size:10px; padding:3px 8px;">▦ Topo Fill</button>
+    <button class="btn" id="btn-corridors" onclick="toggleCorridorViz()" style="font-size:10px; padding:3px 8px;">🫠 Corridors</button>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="main-canvas"></canvas>
+    <div id="loading-overlay">
+      <div class="spinner"></div>
+      <div id="loading-msg">Initializing…</div>
+    </div>
+  </div>
+
+  <!-- ==================== LEGEND ==================== -->
+  <div id="legend">
+    <!-- Populated by JS based on current mode -->
+  </div>
+
+  <!-- ==================== APPLICATION LOGIC ==================== -->
+  <!-- Load order matters: each file depends on the ones above it. -->
+  <script src="config.js"></script>       <!-- CONFIG, state, caches (no deps) -->
+  <script src="data.js"></script>         <!-- candle generation, SMA, RSI, intensity -->
+  <script src="coords.js"></script>       <!-- price-to-pixel mapping, chart dims -->
+  <script src="drawing.js"></script>      <!-- drawCandles, drawGrid, crossForces -->
+  <script src="sightlines.js"></script>   <!-- build + render sight lines, background S/R -->
+  <script src="webgl-heatmap.js"></script><!-- GPU-accelerated heatmap rendering -->
+  <script src="gl-beams.js"></script>    <!-- GPU beam accumulation (Phase 2) -->
+  <script src="heatmap.js"></script>      <!-- build + render raycast heatmap -->
+  <script src="calibrate-indicators.js"></script> <!-- MA/RSI physics calibration from background data -->
+  <script src="regime.js"></script>             <!-- directional regime detection & 3-path prediction -->
+  <script src="signal-layers.js"></script>  <!-- layered signal pipeline (terrain/indicator/energy → coordinators → meta) -->
+  <script src="topology.js"></script>    <!-- topological analysis of pressure field -->
+  <script src="corridor.js"></script>   <!-- slime mold corridor pathfinder -->
+  <script src="gl-particles.js"></script><!-- Three.js GPU particle renderer (bundled) -->
+  <script src="gl-particles-instanced.js"></script><!-- WebGL2 instanced renderer (per-particle color) -->
+  <script src="particles.js"></script>    <!-- terrain flow physics + 2D fallback -->
+  <script src="projection.js"></script>   <!-- multi-path prediction engine -->
+  <script src="ui.js"></script>           <!-- event handlers, toolbar/legend updates -->
+  <script src="main.js"></script>         <!-- drawFrame, animation, resize, fetch, init -->
+
+</body>
+</html>
