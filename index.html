@@ -398,6 +398,39 @@
     <span class="slider-val" id="cf-red-val" style="min-width:20px;">1.0</span>
   </div>
 
+  <!-- ==================== WIND TUNNEL CONTROLS BAR ==================== -->
+  <!-- Particle physics tuning: candle attraction, repulsion, size.
+       Shown/hidden by updateToolbar() when wind tunnel mode is active. -->
+  <div id="particle-controls-bar" style="display:none; align-items:center; gap:10px; padding:5px 14px;
+       border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:wrap; font-size:11px;">
+    <span class="toolbar-label">PARTICLES</span>
+
+    <!-- Candle Attraction — pulls particles toward nearest candle's high/low range -->
+    <span style="color:#8892a4; font-size:10px;">Candle Pull</span>
+    <input type="range" class="slider-input" id="candle-attract-slider" min="0" max="200" step="5" value="80"
+           style="width:70px;" oninput="setParticleParam('candleAttract', this.value)">
+    <span class="slider-val" id="candle-attract-val" style="min-width:24px;">0.80</span>
+
+    <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 4px;"></span>
+
+    <!-- Particle Repulsion -->
+    <span style="color:#8892a4; font-size:10px;">Repulsion</span>
+    <input type="range" class="slider-input" id="particle-repulse-slider" min="0" max="200" step="5" value="35"
+           style="width:70px;" oninput="setParticleParam('repulsion', this.value)">
+    <span class="slider-val" id="particle-repulse-val" style="min-width:24px;">0.35</span>
+
+    <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 4px;"></span>
+
+    <!-- Particle Size -->
+    <span style="color:#8892a4; font-size:10px;">Size</span>
+    <input type="range" class="slider-input" id="particle-size-slider" min="10" max="120" step="5" value="60"
+           style="width:60px;" oninput="setParticleParam('size', this.value)">
+    <span class="slider-val" id="particle-size-val" style="min-width:24px;">6.0</span>
+
+    <!-- Debug: show attractor zones so you can verify placement -->
+    <button class="btn" id="btn-show-attractors" onclick="toggleAttractorDebug()" style="font-size:10px; padding:3px 8px;">👁 Attractors</button>
+  </div>
+
   <!-- ==================== PREDICTION MODEL BAR ==================== -->
   <!-- Toggle individual force components on/off. Shown when projection is on. -->
   <div id="pred-model-bar" style="display:none; align-items:center; gap:8px; padding:5px 14px;
@@ -455,12 +488,16 @@
   <script src="signal-layers.js"></script>  <!-- layered signal pipeline (terrain/indicator/energy → coordinators → meta) -->
   <script src="topology.js"></script>    <!-- topological analysis of pressure field -->
   <script src="corridor.js"></script>   <!-- slime mold corridor pathfinder -->
-  <script src="gl-particles.js"></script><!-- Three.js GPU particle renderer (bundled) -->
-  <script src="gl-particles-instanced.js"></script><!-- WebGL2 instanced renderer (per-particle color) -->
+  <script src="gl-particles-instanced.js"></script><!-- WebGL2 instanced renderer (CPU fallback) -->
   <script src="particles.js"></script>    <!-- terrain flow physics + 2D fallback -->
   <script src="projection.js"></script>   <!-- multi-path prediction engine -->
   <script src="ui.js"></script>           <!-- event handlers, toolbar/legend updates -->
   <script src="main.js"></script>         <!-- drawFrame, animation, resize, fetch, init -->
+
+  <!-- GPU particle system (50K particles, 2D canvas renderer).
+       CPU physics with terrain forces, density repulsion, candle attraction.
+       Auto-initializes after main.js via deferred script. -->
+  <script defer src="gpu-particles.js"></script>
 
 </body>
 </html>

@@ -36,6 +36,11 @@ var lastFrameState = {
   projDims: null
 };
 
+// Reusable typed arrays for passing candle Y-pixel coords to the
+// particle system. Only reallocated when candle count grows.
+var _particleHighY = null;
+var _particleLowY  = null;
+
 // Draw crosshair lines + price/time labels.
 // Works in both the candle area and the projection zone.
 // Called at the end of drawFrame() after all other rendering.
@@ -312,6 +317,7 @@ function togglePlay() {
     // aggressively clearing ensures zero possibility of stale data.
     sightLineCache   = {};
     heatmapCache     = {};
+    clearTopoCache();
     bgGridCache      = {};
     bgSightLineCache = {};
 
@@ -359,6 +365,7 @@ function resetAnim() {
   state.animCandles = 0;
   if (animTimerId) { clearInterval(animTimerId); animTimerId = null; }
   heatmapCache     = {};
+  clearTopoCache();
   sightLineCache   = {};
   bgGridCache      = {};
   bgSightLineCache = {};
@@ -404,6 +411,7 @@ function setAnimSpeed(val) {
 function scrubAnim(val) {
   state.animCandles = val;
   heatmapCache     = {};
+  clearTopoCache();
   sightLineCache   = {};
   bgGridCache      = {};
   bgSightLineCache = {};
@@ -442,6 +450,7 @@ function animTick() {
   // Sight line cache is NOT cleared — each frame either hits a cached
   // entry or builds one quickly via pre-computed visibility pairs.
   heatmapCache = {};
+  clearTopoCache();
   particles = {};
   updateProgress();
   cancelAnim();
@@ -473,6 +482,151 @@ function resetZoom() {
   var home = getHomeOffset();
   state.viewOffsetX = home.x;
   state.viewOffsetY = home.y;
+}
+
+
+// ================================================================
+// TOPOLOGY CACHE
+// ================================================================
+// computeTopology() is expensive at fine resolutions (quadratic in
+// grid cell count). Two-layer caching:
+//
+// 1. STRING KEY CACHE — keyed by the heatmap cache key + color
+//    force values. Immune to V.Beams grid cloning (which creates
+//    new array references each frame even when content is identical).
+//
+// 2. PARTICLE RESOLUTION CAP — particles sample one topo cell per
+//    step. Sub-8px topology resolution gives no physics benefit
+//    but costs O(n²) more computation. When heatmapRes < 8, we
+//    downsample the grids and compute a coarser particle topology.
+
+var _topoCacheKey    = "";      // string key for cache validity
+var _topoCacheResult = null;    // the topology object we computed
+
+// Separate cache for particle topology (may be downsampled).
+// Prevents thrashing when contours need full-res and particles
+// need coarse-res — each has its own cache slot.
+var _ptopoCacheKey    = "";
+var _ptopoCacheResult = null;
+
+// Minimum resolution for particle topology (px per cell).
+// Below this, we downsample the grids for particle physics.
+// The visual heatmap still renders at the user's chosen resolution.
+var PARTICLE_TOPO_MIN_RES = 8;
+
+// Downsample cache (avoid re-downsampling unchanged grids)
+var _dsGrids     = null;   // downsampled grid arrays
+var _dsCols      = 0;
+var _dsRows      = 0;
+var _dsSourceKey = "";     // heatmap key that was downsampled
+
+function _buildTopoKey(hmCacheKey, colorForce) {
+  // Include color weights so slider changes invalidate.
+  // colorForce is mutated in place so we must read its values.
+  var cfStr = "";
+  if (colorForce) {
+    cfStr = (colorForce.green  ? colorForce.green.str  : 1) + ","
+          + (colorForce.yellow ? colorForce.yellow.str : 1) + ","
+          + (colorForce.blue   ? colorForce.blue.str   : 1) + ","
+          + (colorForce.red    ? colorForce.red.str    : 1);
+  }
+  return hmCacheKey + "|cf:" + cfStr;
+}
+
+
+// getCachedTopology — full-res topology (for contours, raycast, etc)
+function getCachedTopology(hmData, colorForce, hmCacheKey) {
+  if (!hmData || typeof computeTopology !== "function") return null;
+
+  var topoKey = _buildTopoKey(hmCacheKey, colorForce);
+
+  if (topoKey === _topoCacheKey && _topoCacheResult) {
+    return _topoCacheResult;
+  }
+
+  _topoCacheResult = computeTopology(hmData.grids, hmData.cols, hmData.rows, colorForce);
+  _topoCacheKey = topoKey;
+  return _topoCacheResult;
+}
+
+
+// getParticleTopology — topology at capped resolution for particles
+//
+// Uses its own cache slot (_ptopoCacheKey) so it doesn't thrash
+// with the full-res contour/raycast cache.
+//
+// Returns { topo, res } where res is the effective cell size in px.
+
+function getParticleTopology(hmData, colorForce, hmCacheKey, heatmapRes) {
+  if (!hmData || typeof computeTopology !== "function") {
+    return { topo: null, res: heatmapRes };
+  }
+
+  // If resolution is coarse enough, share the standard cache
+  if (heatmapRes >= PARTICLE_TOPO_MIN_RES) {
+    return {
+      topo: getCachedTopology(hmData, colorForce, hmCacheKey),
+      res:  heatmapRes
+    };
+  }
+
+  // Fine resolution — downsample grids for particle physics.
+  var factor = Math.ceil(PARTICLE_TOPO_MIN_RES / heatmapRes);
+  var coarseRes = heatmapRes * factor;
+  var coarseCols = Math.ceil(hmData.cols / factor);
+  var coarseRows = Math.ceil(hmData.rows / factor);
+
+  // Check particle-specific cache
+  var dsTopoKey = _buildTopoKey(hmCacheKey + "|ds" + factor, colorForce);
+
+  if (dsTopoKey === _ptopoCacheKey && _ptopoCacheResult) {
+    return { topo: _ptopoCacheResult, res: coarseRes };
+  }
+
+  // Downsample: average each factor×factor block of fine cells
+  if (_dsSourceKey !== hmCacheKey || !_dsGrids) {
+    var nChannels = hmData.grids.length;
+    var coarseCellCount = coarseCols * coarseRows;
+    _dsGrids = [];
+    for (var ch = 0; ch < nChannels; ch++) {
+      var src = hmData.grids[ch];
+      var dst = new Float32Array(coarseCellCount);
+
+      for (var cy = 0; cy < coarseRows; cy++) {
+        for (var cx = 0; cx < coarseCols; cx++) {
+          var sum = 0;
+          var count = 0;
+          var fyEnd = Math.min((cy + 1) * factor, hmData.rows);
+          var fxEnd = Math.min((cx + 1) * factor, hmData.cols);
+          for (var fy = cy * factor; fy < fyEnd; fy++) {
+            for (var fx = cx * factor; fx < fxEnd; fx++) {
+              sum += src[fy * hmData.cols + fx];
+              count++;
+            }
+          }
+          dst[cy * coarseCols + cx] = count > 0 ? sum / count : 0;
+        }
+      }
+      _dsGrids.push(dst);
+    }
+    _dsCols = coarseCols;
+    _dsRows = coarseRows;
+    _dsSourceKey = hmCacheKey;
+  }
+
+  _ptopoCacheResult = computeTopology(_dsGrids, _dsCols, _dsRows, colorForce);
+  _ptopoCacheKey = dsTopoKey;
+  return { topo: _ptopoCacheResult, res: coarseRes };
+}
+
+
+function clearTopoCache() {
+  _topoCacheKey     = "";
+  _topoCacheResult  = null;
+  _ptopoCacheKey    = "";
+  _ptopoCacheResult = null;
+  _dsSourceKey      = "";
+  _dsGrids          = null;
 }
 
 
@@ -668,48 +822,163 @@ function drawFrame() {
       );
     }
 
-    // --- PARTICLE MODE (step physics — rendering happens after overlays) ---
-    var particleTopo = null;
+    // --- PARTICLE MODE ---
     if (state.mode === "particle") {
-      if (!particles[assetKey]) {
-        particles[assetKey] = createParticles();
-      }
 
-      var maxP = state.multiAsset
-        ? Math.floor(CONFIG.PARTICLE_COUNT / 3)
-        : CONFIG.PARTICLE_COUNT;
+      // ---- GPU PARTICLE PATH (Three.js WebGPU, 50K particles) ----
+      // When the GPU system is ready, it handles everything: physics
+      // (compute shader), rendering (sprites), and motion blur
+      // (AfterImage post-processing). The CPU particle system is
+      // completely bypassed.
+      if (window.gpuParticles && window.gpuParticles.ready) {
 
-      // Only emit new particles when animation is paused.
-      if (!state.animating) {
-        emitParticles(particles[assetKey], candles, dims, maxP);
-      }
-
-      var crossForces = null;
-      if (state.multiAsset) {
-        crossForces = [];
-        for (var oi = 0; oi < assetsToRender.length; oi++) {
-          var otherKey = assetsToRender[oi];
-          if (otherKey === assetKey) continue;
-          var otherForces = computeCrossForces(
-            candleData[otherKey], dims, CONFIG.MCAP[otherKey]
-          );
-          for (var fi = 0; fi < otherForces.length; fi++) {
-            crossForces.push(otherForces[fi]);
+        // Upload topology to GPU when it changes
+        if (hmData) {
+          var gpuTopo = getCachedTopology(hmData, state.colorForce, cacheKey);
+          if (gpuTopo && gpuTopo.intensity) {
+            window.gpuParticles.updateTopology(
+              gpuTopo.intensity, gpuTopo.cols, gpuTopo.rows, state.heatmapRes
+            );
           }
         }
-      }
 
-      // Compute topology from the heatmap grids
-      if (hmData && typeof computeTopology === "function") {
-        particleTopo = computeTopology(hmData.grids, hmData.cols, hmData.rows, state.colorForce);
-      }
+        // Always update dims (not gated on hmData)
+        window.gpuParticles.updateDims(
+          dims.chartLeft, dims.chartTop, dims.chartWidth, dims.chartHeight,
+          dims.width, dims.height
+        );
 
-      particles[assetKey] = stepParticles(
-        particles[assetKey], candles, dims, crossForces, particleTopo, state.heatmapRes
-      );
+        // ---- Pass candle attractor data to particle physics ----
+        // Uses CONFIG.CANDLE_COUNT for slot width to match indexToX(),
+        // which is how drawing.js positions the rendered candles.
+        var pSlotW = dims.chartWidth / CONFIG.CANDLE_COUNT;
+        var pCount = candles.length;
+        if (!_particleHighY || _particleHighY.length < pCount) {
+          _particleHighY = new Float32Array(pCount);
+          _particleLowY  = new Float32Array(pCount);
+        }
+        for (var ci = 0; ci < pCount; ci++) {
+          _particleHighY[ci] = priceToY(candles[ci].h, range.priceMin, range.priceMax, dims.chartTop, dims.chartHeight);
+          _particleLowY[ci]  = priceToY(candles[ci].l, range.priceMin, range.priceMax, dims.chartTop, dims.chartHeight);
+        }
+        window.gpuParticles.updateCandles(_particleHighY, _particleLowY, pCount, pSlotW);
+
+        // Show the overlay canvas
+        window.gpuParticles.setVisible(true);
+
+        // Render the GPU particle frame
+        window.gpuParticles.render(
+          state.viewScale, state.viewOffsetX, state.viewOffsetY,
+          screenW, screenH
+        );
+
+        // ---- Attractor debug overlay ----
+        // Reads back from getCandleDebugData() so it draws exactly
+        // what the particle physics step sees — not what we think
+        // we sent it. Any mismatch with rendered candles = bug.
+        //   Magenta ticks = high Y targets (pull-down boundary)
+        //   Cyan ticks    = low Y targets  (pull-up boundary)
+        //   Faint band    = free-flow zone  (no attraction force)
+        //   Dotted lines  = slot edges the physics uses for lookup
+        if (state.showAttractorDebug && window.gpuParticles.getCandleDebugData) {
+          var dbg = window.gpuParticles.getCandleDebugData();
+          if (dbg.highY && dbg.count > 0) {
+            ctx.save();
+            ctx.globalAlpha = 0.6;
+            for (var di = 0; di < dbg.count; di++) {
+              var slotLeft = dims.chartLeft + di * dbg.slotW;
+              var hY = dbg.highY[di];
+              var lY = dbg.lowY[di];
+
+              // Free-flow zone band (faint cyan fill between high and low)
+              ctx.fillStyle = "rgba(0,255,200,0.06)";
+              ctx.fillRect(slotLeft, hY, dbg.slotW, lY - hY);
+
+              // High attractor tick (magenta — pull-down boundary)
+              ctx.strokeStyle = "#ff44ff";
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.moveTo(slotLeft + 2, hY);
+              ctx.lineTo(slotLeft + dbg.slotW - 2, hY);
+              ctx.stroke();
+
+              // Low attractor tick (cyan — pull-up boundary)
+              ctx.strokeStyle = "#00ffcc";
+              ctx.beginPath();
+              ctx.moveTo(slotLeft + 2, lY);
+              ctx.lineTo(slotLeft + dbg.slotW - 2, lY);
+              ctx.stroke();
+
+              // Slot edge (dotted, very faint vertical)
+              ctx.strokeStyle = "rgba(255,255,255,0.08)";
+              ctx.lineWidth = 0.5;
+              ctx.setLineDash([2, 4]);
+              ctx.beginPath();
+              ctx.moveTo(slotLeft, dims.chartTop);
+              ctx.lineTo(slotLeft, dims.chartTop + dims.chartHeight);
+              ctx.stroke();
+              ctx.setLineDash([]);
+            }
+            ctx.restore();
+          }
+        }
+
+      } else {
+        // ---- CPU FALLBACK (original 5K particle system) ----
+        if (window.gpuParticles) window.gpuParticles.setVisible(false);
+
+        if (!particles[assetKey]) {
+          particles[assetKey] = createParticles();
+        }
+
+        var maxP = state.multiAsset
+          ? Math.floor(CONFIG.PARTICLE_COUNT / 3)
+          : CONFIG.PARTICLE_COUNT;
+
+        if (!state.animating) {
+          emitParticles(particles[assetKey], candles, dims, maxP);
+        }
+
+        var crossForces = null;
+        if (state.multiAsset) {
+          crossForces = [];
+          for (var oi = 0; oi < assetsToRender.length; oi++) {
+            var otherKey = assetsToRender[oi];
+            if (otherKey === assetKey) continue;
+            var otherForces = computeCrossForces(
+              candleData[otherKey], dims, CONFIG.MCAP[otherKey]
+            );
+            for (var fi = 0; fi < otherForces.length; fi++) {
+              crossForces.push(otherForces[fi]);
+            }
+          }
+        }
+
+        var particleTopo = null;
+        var particleTopoRes = state.heatmapRes;
+        if (hmData) {
+          var ptResult = getParticleTopology(hmData, state.colorForce, cacheKey, state.heatmapRes);
+          particleTopo = ptResult.topo;
+          particleTopoRes = ptResult.res;
+        }
+
+        particles[assetKey] = stepParticles(
+          particles[assetKey], candles, dims, crossForces, particleTopo, particleTopoRes
+        );
+
+        // Render CPU particles
+        renderParticleTrails(particles[assetKey]);
+        if (window._useGLParticlesInstanced) {
+          renderParticlesInstanced(particles[assetKey], ctx, canvas,
+            state.viewScale, state.viewOffsetX, state.viewOffsetY);
+        } else {
+          renderParticles(particles[assetKey]);
+        }
+      }
+    } else {
+      // Not in particle mode — hide GPU overlay if present
+      if (window.gpuParticles) window.gpuParticles.setVisible(false);
     }
-
-    // --- SIGHT LINES MODE ---
     if (state.mode === "sightlines" && slData) {
       renderSightLines(
         slData,
@@ -732,9 +1001,7 @@ function drawFrame() {
     if ((state.showContours || state.contourFill) && (state.mode === "raycast" || state.mode === "particle") && hmData) {
       var contourTopo = (projData && projData.topology)
         ? projData.topology
-        : (typeof computeTopology === "function")
-          ? computeTopology(hmData.grids, hmData.cols, hmData.rows, state.colorForce)
-          : null;
+        : getCachedTopology(hmData, state.colorForce, cacheKey);
 
       if (contourTopo) {
         renderContours(ctx, contourTopo, state.heatmapRes, 5, {
@@ -764,20 +1031,6 @@ function drawFrame() {
     if (isCalibrated && state.showCorridors && projData && projData.corridorData
         && typeof renderCorridors === "function") {
       renderCorridors(ctx, projData.corridorData, state.heatmapRes);
-    }
-
-    // --- PARTICLE RENDERING (after all overlays so particles are visible) ---
-    if (state.mode === "particle" && particles[assetKey]) {
-      // Draw trails first on the 2D canvas (inside zoom/pan transform)
-      renderParticleTrails(particles[assetKey]);
-
-      // Then draw particle dots (GPU instanced or 2D fallback)
-      if (window._useGLParticlesInstanced) {
-        renderParticlesInstanced(particles[assetKey], ctx, canvas,
-          state.viewScale, state.viewOffsetX, state.viewOffsetY);
-      } else {
-        renderParticles(particles[assetKey]);
-      }
     }
 
     // --- CANDLES (drawn on top of the visualization) ---
@@ -866,7 +1119,11 @@ function drawFrame() {
   ctx.fillText(
     state.mode === "raycast" ? "RAYCAST / BEAM PRESSURE" :
     state.mode === "sightlines" ? "SIGHT LINES / LINE OF SIGHT" :
-    "TERRAIN FLOW [" + (particles[state.asset] ? particles[state.asset].length : 0) + " particles]",
+    "TERRAIN FLOW [" + (
+      (window.gpuParticles && window.gpuParticles.ready)
+        ? window.gpuParticles.PARTICLE_COUNT + " GPU"
+        : (particles[state.asset] ? particles[state.asset].count : 0)
+    ) + " particles]",
     wmX, wmY
   );
 
@@ -957,10 +1214,16 @@ function resizeCanvas() {
 
   // Caches are invalid after resize
   heatmapCache     = {};
+  clearTopoCache();
   sightLineCache   = {};
   bgSightLineCache = {};
   bgGridCache      = {};
   particles        = {};
+
+  // Resize GPU particle overlay if active
+  if (window.gpuParticles && window.gpuParticles.ready) {
+    window.gpuParticles.resize(w, h);
+  }
 }
 
 
@@ -1435,6 +1698,7 @@ async function fetchLive() {
   // ================================================================
 
   heatmapCache     = {};
+  clearTopoCache();
   sightLineCache   = {};
   bgSightLineCache = {};
   bgGridCache      = {};
@@ -2180,6 +2444,7 @@ async function fetchLiveCoinGecko() {
   // ================================================================
 
   heatmapCache     = {};
+  clearTopoCache();
   sightLineCache   = {};
   bgSightLineCache = {};
   bgGridCache      = {};
@@ -2365,6 +2630,7 @@ function useGenerated() {
   candleData.BTC = generateCandles(68000, 0.004, CONFIG.CANDLE_COUNT, 303);
 
   heatmapCache     = {};
+  clearTopoCache();
   sightLineCache   = {};
   bgSightLineCache = {};
   bgGridCache      = {};
@@ -2603,6 +2869,7 @@ function preprocessChart(callback) {
 
     // Clear caches so the first drawFrame uses fresh precomputed data
     heatmapCache     = {};
+    clearTopoCache();
     sightLineCache   = {};
     bgSightLineCache = {};
     bgGridCache      = {};
@@ -2633,19 +2900,28 @@ function init() {
   var glBOk = (typeof initGLBeams === "function") ? initGLBeams() : false;
   console.log("Beam renderer: " + (glBOk ? "GPU instanced (Phase 2)" : "CPU (Phase 1 caching)"));
 
-  // Initialize WebGL2 instanced particle renderer (per-particle color).
-  // Falls back to Three.js Points (uniform color) or 2D canvas.
+  // Initialize WebGL2 instanced particle renderer (CPU fallback for
+  // when the GPU compute particle system isn't available).
   var glPInstOk = (typeof initGLParticlesInstanced === "function") ? initGLParticlesInstanced() : false;
-  console.log("Particle renderer: " + (glPInstOk ? "WebGL2 instanced (GPU)" : "checking fallbacks..."));
   window._useGLParticlesInstanced = glPInstOk;
+  window._useGLParticles = false;
+  console.log("Particle renderer: " + (glPInstOk ? "WebGL2 instanced (GPU)" : "2D Canvas (CPU)"));
 
-  // Three.js fallback (if instanced not available)
-  var glPOk = false;
-  if (!glPInstOk) {
-    glPOk = (typeof initGLParticles === "function") ? initGLParticles() : false;
-    console.log("Particle fallback: " + (glPOk ? "Three.js (GPU, uniform color)" : "2D Canvas (CPU)"));
+  // Initialize Three.js WebGPU particle system (50K particles, compute shaders).
+  // This is async — when ready, drawFrame will use it instead of CPU particles.
+  // Falls back to existing CPU system if WebGPU/WebGL2 unavailable.
+  if (typeof window.gpuParticles !== "undefined") {
+    var container = document.getElementById("canvas-wrap");
+    window.gpuParticles.init(container).then(function() {
+      if (window.gpuParticles.ready) {
+        console.log("GPU particles: Three.js WebGPU (" + window.gpuParticles.PARTICLE_COUNT + " particles)");
+      } else {
+        console.log("GPU particles: init failed, using CPU fallback");
+      }
+    }).catch(function(e) {
+      console.warn("GPU particles: error during init, using CPU fallback", e);
+    });
   }
-  window._useGLParticles = glPOk;
 
   // Generate candle data for all three assets
   candleData.SOL = generateCandles(88,    0.008, CONFIG.CANDLE_COUNT, 101);

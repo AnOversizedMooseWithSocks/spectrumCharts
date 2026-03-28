@@ -1,24 +1,25 @@
 /*
  * ================================================================
- * gl-particles-instanced.js  —  WebGL2 Instanced Particle Renderer
+ * gl-particles-instanced.js  —  Point Sprites + Motion Blur
  * ================================================================
  * Depends on: config.js (CONFIG)
  *
- * Renders all particles in a SINGLE draw call using WebGL2 instanced
- * rendering. Each particle is a point sprite with per-instance:
- *   - position (x, y)
- *   - color (r, g, b)
- *   - alpha
- *   - size
+ * ACCUMULATION BUFFER MOTION BLUR:
  *
- * This replaces both the old Three.js renderer (uniform color only)
- * and the 2D canvas fallback (8000 individual arc() calls per frame).
+ * Instead of clearing the framebuffer each frame, we:
+ *   1. Draw a fullscreen fade quad that dims the previous frame
+ *   2. Draw new point sprites at current positions (bright)
  *
- * Performance: one draw call for all particles. Buffer updates use
- * Float32Array subData — no object allocation per frame.
+ * Old positions persist and gradually fade out over several frames,
+ * creating natural motion trails. Zero CPU cost — no trail history
+ * buffers, no velocity lines, no instanced quads. Just one extra
+ * fullscreen quad draw per frame.
  *
- * Composited onto the main 2D canvas via drawImage() from an
- * offscreen WebGL canvas.
+ * The fade alpha controls trail length:
+ *   0.10 = long comet tails (~10 frames of persistence)
+ *   0.20 = medium trails (~5 frames)
+ *   0.35 = short trails (~3 frames)
+ *
  * ================================================================
  */
 
@@ -26,70 +27,127 @@ var _glpInst = {
   ready:     false,
   gl:        null,
   canvas:    null,
-  program:   null,
-  vao:       null,
-  instBuf:   null,     // instance buffer (position + color + alpha + size)
-  instData:  null,     // Float32Array backing the instance buffer
-  capacity:  0,        // current buffer capacity (particle count)
+  // Point sprite program
+  progPts:   null,
+  vaoPts:    null,
+  instBuf:   null,
+  instData:  null,
+  capacity:  0,
+  uPtsRes:   null,
+  uPtsOff:   null,
+  uPtsScale: null,
+  // Fade quad program
+  progFade:  null,
+  vaoFade:   null,
+  uFadeAlpha: null,
+  // Canvas size
   lastW:     0,
   lastH:     0,
-  uResolution: null,
-  uOffset:   null,
-  uScale:    null,
 };
 
-// Per-instance data layout: x, y, r, g, b, a, size = 7 floats
+// Per-instance data: x, y, r, g, b, a, size = 7 floats
 var INST_FLOATS = 7;
 
+// Trail length: lower = longer tails. Range 0.05 (very long) to 0.5 (very short).
+var MOTION_BLUR_FADE = 0.15;
+
+
 // ================================================================
-// SHADERS
+// SHADERS — Point Sprites (same as the proven working version)
 // ================================================================
 
-var _glpVertSrc = [
+var _ptsVertSrc = [
   "#version 300 es",
   "precision highp float;",
-  "",
-  "// Per-instance attributes",
-  "layout(location = 0) in vec2 aPos;",       // x, y in world coords
-  "layout(location = 1) in vec4 aColor;",     // r, g, b, a
-  "layout(location = 2) in float aSize;",     // point size in world units
-  "",
-  "uniform vec2 uResolution;",               // screen size in pixels
-  "uniform vec2 uOffset;",                   // viewOffsetX, viewOffsetY
-  "uniform float uScale;",                   // viewScale
-  "",
+  "layout(location = 0) in vec2 aPos;",
+  "layout(location = 1) in vec4 aColor;",
+  "layout(location = 2) in float aSize;",
+  "uniform vec2 uRes;",
+  "uniform vec2 uOff;",
+  "uniform float uScale;",
   "out vec4 vColor;",
-  "",
   "void main() {",
-  "  // Apply zoom/pan: screen = world * scale + offset",
-  "  vec2 screen = aPos * uScale + uOffset;",
-  "  // Convert pixel coords to clip space (-1..1)",
-  "  vec2 clip = (screen / uResolution) * 2.0 - 1.0;",
-  "  clip.y = -clip.y;  // flip Y (canvas Y is top-down)",
-  "  gl_Position = vec4(clip, 0.0, 1.0);",
-  "  gl_PointSize = aSize * uScale;",        // scale point size with zoom
+  "  vec2 sc = aPos * uScale + uOff;",
+  "  vec2 cl = (sc / uRes) * 2.0 - 1.0;",
+  "  cl.y = -cl.y;",
+  "  gl_Position = vec4(cl, 0.0, 1.0);",
+  "  gl_PointSize = aSize * uScale;",
   "  vColor = aColor;",
   "}",
 ].join("\n");
 
-var _glpFragSrc = [
+var _ptsFragSrc = [
   "#version 300 es",
   "precision highp float;",
-  "",
   "in vec4 vColor;",
   "out vec4 fragColor;",
-  "",
   "void main() {",
-  "  // Circular point sprite: discard corners",
   "  vec2 pc = gl_PointCoord * 2.0 - 1.0;",
   "  float d = dot(pc, pc);",
   "  if (d > 1.0) discard;",
-  "",
-  "  // Soft edge falloff",
   "  float edge = 1.0 - smoothstep(0.5, 1.0, d);",
   "  fragColor = vec4(vColor.rgb, vColor.a * edge);",
   "}",
 ].join("\n");
+
+
+// ================================================================
+// SHADERS — Fullscreen Fade Quad
+// ================================================================
+// Covers the entire screen using gl_VertexID (no vertex buffer).
+// Outputs black with configurable alpha. When blended with
+// DST_COLOR mode, it darkens the existing framebuffer content.
+
+var _fadeVertSrc = [
+  "#version 300 es",
+  "void main() {",
+  "  // Fullscreen triangle from vertex ID (covers clip space)",
+  "  float fx = float(gl_VertexID & 1) * 4.0 - 1.0;",
+  "  float fy = float(gl_VertexID & 2) * 2.0 - 1.0;",
+  "  gl_Position = vec4(fx, fy, 0.0, 1.0);",
+  "}",
+].join("\n");
+
+var _fadeFragSrc = [
+  "#version 300 es",
+  "precision highp float;",
+  "uniform float uAlpha;",
+  "out vec4 fragColor;",
+  "void main() {",
+  "  fragColor = vec4(0.0, 0.0, 0.0, uAlpha);",
+  "}",
+].join("\n");
+
+
+// ================================================================
+// HELPER: compile + link a shader program
+// ================================================================
+
+function _buildProgram(gl, vsSrc, fsSrc, label) {
+  var vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, vsSrc);
+  gl.compileShader(vs);
+  if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+    console.warn("[gl-particles] " + label + " VS:", gl.getShaderInfoLog(vs));
+    return null;
+  }
+  var fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, fsSrc);
+  gl.compileShader(fs);
+  if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+    console.warn("[gl-particles] " + label + " FS:", gl.getShaderInfoLog(fs));
+    return null;
+  }
+  var prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.warn("[gl-particles] " + label + " link:", gl.getProgramInfoLog(prog));
+    return null;
+  }
+  return prog;
+}
 
 
 // ================================================================
@@ -98,87 +156,83 @@ var _glpFragSrc = [
 
 function initGLParticlesInstanced() {
   try {
-    // Create offscreen canvas for WebGL rendering
     var c = document.createElement("canvas");
     var gl = c.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: false,
       antialias: false,
+      // CRITICAL: preserve content between frames for accumulation
+      preserveDrawingBuffer: true,
     });
     if (!gl) {
-      console.warn("[gl-particles-instanced] WebGL2 not available");
+      console.warn("[gl-particles] WebGL2 not available");
       return false;
     }
 
-    // Compile shaders
-    var vs = gl.createShader(gl.VERTEX_SHADER);
-    gl.shaderSource(vs, _glpVertSrc);
-    gl.compileShader(vs);
-    if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
-      console.warn("[gl-particles-instanced] Vertex shader error:", gl.getShaderInfoLog(vs));
-      return false;
-    }
+    // ---- Build point sprite program ----
+    var progPts = _buildProgram(gl, _ptsVertSrc, _ptsFragSrc, "points");
+    if (!progPts) return false;
 
-    var fs = gl.createShader(gl.FRAGMENT_SHADER);
-    gl.shaderSource(fs, _glpFragSrc);
-    gl.compileShader(fs);
-    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
-      console.warn("[gl-particles-instanced] Fragment shader error:", gl.getShaderInfoLog(fs));
-      return false;
-    }
+    // ---- Build fade quad program ----
+    var progFade = _buildProgram(gl, _fadeVertSrc, _fadeFragSrc, "fade");
+    if (!progFade) return false;
 
-    var prog = gl.createProgram();
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      console.warn("[gl-particles-instanced] Link error:", gl.getProgramInfoLog(prog));
-      return false;
-    }
-
-    // Get uniform locations
-    var uRes    = gl.getUniformLocation(prog, "uResolution");
-    var uOffset = gl.getUniformLocation(prog, "uOffset");
-    var uScale  = gl.getUniformLocation(prog, "uScale");
-
-    // Create VAO with instance buffer
-    var vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
+    // ---- Point sprite VAO ----
+    var vaoPts = gl.createVertexArray();
+    gl.bindVertexArray(vaoPts);
 
     var instBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
 
-    // Attribute 0: aPos (vec2) — offset 0, stride 7*4=28
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, INST_FLOATS * 4, 0);
-    gl.vertexAttribDivisor(0, 1);  // per instance
+    var stride = INST_FLOATS * 4;  // 28 bytes
 
-    // Attribute 1: aColor (vec4) — offset 2*4=8
+    // Attr 0: aPos (vec2) — offset 0
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, stride, 0);
+    gl.vertexAttribDivisor(0, 1);
+
+    // Attr 1: aColor (vec4) — offset 8
     gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, INST_FLOATS * 4, 2 * 4);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, stride, 8);
     gl.vertexAttribDivisor(1, 1);
 
-    // Attribute 2: aSize (float) — offset 6*4=24
+    // Attr 2: aSize (float) — offset 24
     gl.enableVertexAttribArray(2);
-    gl.vertexAttribPointer(2, 1, gl.FLOAT, false, INST_FLOATS * 4, 6 * 4);
+    gl.vertexAttribPointer(2, 1, gl.FLOAT, false, stride, 24);
     gl.vertexAttribDivisor(2, 1);
 
     gl.bindVertexArray(null);
 
-    _glpInst.gl        = gl;
-    _glpInst.canvas    = c;
-    _glpInst.program   = prog;
-    _glpInst.vao       = vao;
-    _glpInst.instBuf   = instBuf;
-    _glpInst.uResolution = uRes;
-    _glpInst.uOffset    = uOffset;
-    _glpInst.uScale     = uScale;
-    _glpInst.ready       = true;
+    // ---- Fade quad VAO (no buffers — uses gl_VertexID) ----
+    var vaoFade = gl.createVertexArray();
+    // Empty VAO — the shader generates positions from gl_VertexID
 
-    console.log("[gl-particles-instanced] WebGL2 instanced renderer ready");
+    // ---- Store uniforms ----
+    _glpInst.uPtsRes   = gl.getUniformLocation(progPts, "uRes");
+    _glpInst.uPtsOff   = gl.getUniformLocation(progPts, "uOff");
+    _glpInst.uPtsScale = gl.getUniformLocation(progPts, "uScale");
+    _glpInst.uFadeAlpha = gl.getUniformLocation(progFade, "uAlpha");
+
+    // ---- Store state ----
+    _glpInst.gl       = gl;
+    _glpInst.canvas   = c;
+    _glpInst.progPts  = progPts;
+    _glpInst.progFade = progFade;
+    _glpInst.vaoPts   = vaoPts;
+    _glpInst.vaoFade  = vaoFade;
+    _glpInst.instBuf  = instBuf;
+    _glpInst.capacity = 0;
+    _glpInst.instData = null;
+    _glpInst.ready    = true;
+
+    // Start with a black canvas
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    console.log("[gl-particles] Motion-blur point-sprite renderer ready");
     return true;
   } catch (e) {
-    console.warn("[gl-particles-instanced] Init failed:", e);
+    console.warn("[gl-particles] Init failed:", e);
     return false;
   }
 }
@@ -187,23 +241,21 @@ function initGLParticlesInstanced() {
 // ================================================================
 // RENDER
 // ================================================================
-// particleArr:  array of particle objects
-// ctx:          the main 2D canvas context to composite onto
-// mainCanvas:   the main canvas element (for sizing)
-// viewScale:    current zoom level (state.viewScale)
-// viewOffsetX:  pan offset X (state.viewOffsetX)
-// viewOffsetY:  pan offset Y (state.viewOffsetY)
+// Each frame:
+//   1. Fade previous frame (dim old particle positions)
+//   2. Draw new point sprites (bright at current positions)
+//   3. Composite onto main 2D canvas
 
-function renderParticlesInstanced(particleArr, ctx, mainCanvas, viewScale, viewOffsetX, viewOffsetY) {
+function renderParticlesInstanced(pool, ctx, mainCanvas, viewScale, viewOffsetX, viewOffsetY) {
   if (!_glpInst.ready) return false;
 
-  var n = particleArr.length;
+  var n = pool.count;
   if (n === 0) return true;
 
   var gl = _glpInst.gl;
   var c  = _glpInst.canvas;
 
-  // Resize offscreen canvas to match main canvas logical size
+  // Resize (clears accumulated trails — fine, they rebuild in a few frames)
   var w = mainCanvas.logicalWidth  || mainCanvas.clientWidth;
   var h = mainCanvas.logicalHeight || mainCanvas.clientHeight;
   if (w !== _glpInst.lastW || h !== _glpInst.lastH) {
@@ -221,36 +273,36 @@ function renderParticlesInstanced(particleArr, ctx, mainCanvas, viewScale, viewO
     _glpInst.capacity = newCap;
     gl.bindBuffer(gl.ARRAY_BUFFER, _glpInst.instBuf);
     gl.bufferData(gl.ARRAY_BUFFER, _glpInst.instData.byteLength, gl.DYNAMIC_DRAW);
-    console.log("[gl-particles-instanced] Buffer grew to " + newCap);
   }
 
   var data = _glpInst.instData;
 
-  // ---- Fill instance data ----
-  for (var i = 0; i < n; i++) {
-    var p = particleArr[i];
-    var off = i * INST_FLOATS;
-    var fade = (p.fadeMult !== undefined) ? p.fadeMult : 1.0;
+  // ---- Fill instance data from SoA arrays ----
+  var ppx = pool.px, ppy = pool.py;
+  var pvx = pool.vx, pvy = pool.vy;
+  var pFade = pool.fade, pTopoI = pool.topoI;
 
-    // Color: topology intensity → valley (white-cyan) to ridge (orange)
-    var ti = p.topoIntensity || 0;
-    var t = Math.min(1.0, ti * 3.0);
+  for (var i = 0; i < n; i++) {
+    var off = i * INST_FLOATS;
+
+    var ti = pTopoI[i];
+    var t = ti * 3.0;
+    if (t > 1.0) t = 1.0;
     t = t * t;
 
-    var r = (200 + (255 - 200) * t) / 255;
-    var g = (240 + (140 - 240) * t) / 255;
-    var b = (255 + (40 - 255)  * t) / 255;
+    var r = (200 + 55 * t) / 255;
+    var g = (240 - 100 * t) / 255;
+    var b = (255 - 215 * t) / 255;
 
-    // Alpha: high minimum, speed modulates brightness
-    var speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
-    var bright = Math.min(1.0, speed / 2.0);
-    var alpha = (0.7 + bright * 0.3) * fade;
-
-    // Size: slightly smaller for cleaner flow lines at high particle counts
+    var vxi = pvx[i], vyi = pvy[i];
+    var speed = Math.sqrt(vxi * vxi + vyi * vyi);
+    var bright = speed * 0.5;
+    if (bright > 1.0) bright = 1.0;
+    var alpha = (0.7 + bright * 0.3) * pFade[i];
     var size = 2.8 + bright * 0.8;
 
-    data[off]     = p.x;
-    data[off + 1] = p.y;
+    data[off]     = ppx[i];
+    data[off + 1] = ppy[i];
     data[off + 2] = r;
     data[off + 3] = g;
     data[off + 4] = b;
@@ -258,36 +310,52 @@ function renderParticlesInstanced(particleArr, ctx, mainCanvas, viewScale, viewO
     data[off + 6] = size;
   }
 
-  // Upload instance data
+  // ================================================================
+  // PASS 1: Fade previous frame
+  // ================================================================
+  // Draw a fullscreen black quad with alpha = MOTION_BLUR_FADE.
+  // Blend: multiply existing framebuffer RGB by (1 - alpha).
+  // This dims old particle positions so they gradually disappear.
+
+  gl.disable(gl.DEPTH_TEST);
+  gl.enable(gl.BLEND);
+  gl.blendFuncSeparate(
+    gl.ZERO, gl.ONE_MINUS_SRC_ALPHA,   // RGB: dst * (1 - srcA)
+    gl.ZERO, gl.ONE_MINUS_SRC_ALPHA    // A:   dst * (1 - srcA)
+  );
+
+  gl.useProgram(_glpInst.progFade);
+  gl.uniform1f(_glpInst.uFadeAlpha, MOTION_BLUR_FADE);
+
+  gl.bindVertexArray(_glpInst.vaoFade);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindVertexArray(null);
+
+  // ================================================================
+  // PASS 2: Draw new point sprites
+  // ================================================================
+  // Additive blend: new particles add brightness on top of the
+  // faded trails. This gives a bright head with dimming tail.
+
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);  // additive
+
+  gl.useProgram(_glpInst.progPts);
+  gl.uniform2f(_glpInst.uPtsRes, w, h);
+  gl.uniform2f(_glpInst.uPtsOff, viewOffsetX || 0, viewOffsetY || 0);
+  gl.uniform1f(_glpInst.uPtsScale, viewScale || 1.0);
+
   gl.bindBuffer(gl.ARRAY_BUFFER, _glpInst.instBuf);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, data.subarray(0, n * INST_FLOATS));
 
-  // ---- Draw ----
-  gl.clearColor(0, 0, 0, 0);
-  gl.clear(gl.COLOR_BUFFER_BIT);
-
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-  gl.useProgram(_glpInst.program);
-  gl.uniform2f(_glpInst.uResolution, w, h);
-  gl.uniform2f(_glpInst.uOffset, viewOffsetX || 0, viewOffsetY || 0);
-  gl.uniform1f(_glpInst.uScale, viewScale || 1.0);
-
-  gl.bindVertexArray(_glpInst.vao);
-
-  // Draw N instances of a single point (gl.POINTS with instancing)
+  gl.bindVertexArray(_glpInst.vaoPts);
   gl.drawArraysInstanced(gl.POINTS, 0, 1, n);
-
   gl.bindVertexArray(null);
 
-  // ---- Composite onto 2D canvas ----
-  // The main 2D canvas has a zoom/pan transform active (ctx.translate + scale).
-  // Since our WebGL shader already applies the viewport transform, we need
-  // to temporarily reset the 2D transform to avoid double-transformation.
+  // ================================================================
+  // Composite onto main 2D canvas
+  // ================================================================
   ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);  // reset to identity
-  // Account for DPR scaling that's always active on the canvas
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   var dpr = Math.max(2, window.devicePixelRatio || 1);
   ctx.scale(dpr, dpr);
   ctx.globalCompositeOperation = "lighter";
@@ -297,6 +365,5 @@ function renderParticlesInstanced(particleArr, ctx, mainCanvas, viewScale, viewO
   return true;
 }
 
-// Export to global scope
 window.initGLParticlesInstanced  = initGLParticlesInstanced;
 window.renderParticlesInstanced  = renderParticlesInstanced;

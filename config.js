@@ -131,6 +131,7 @@ var state = {
   contourFlow:  false, // draw sparse flow-direction arrows (noisy, off by default)
   contourFill:  true,  // draw greyscale elevation fill behind contour lines
   showCorridors: true,  // draw corridor pathfinding overlay (green dashed lines)
+  showAttractorDebug: false, // draw particle attractor zones for visual verification
 
   // -- Indicator overlay visibility --
   // These just draw the lines on the chart for reference.

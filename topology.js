@@ -52,6 +52,29 @@ var TOPO_G_RED    = 3;
 
 
 // ================================================================
+// ================================================================
+// BLUR BUFFER POOL — reuse intermediate arrays across calls
+// ================================================================
+// The blur passes are the biggest allocation cost: 4 new
+// Float32Arrays of (cols*rows) per call, each immediately GC'd.
+// Pool two buffers for ping-pong blur. Output arrays (gradX, etc)
+// are allocated fresh because multiple topology results can coexist
+// (e.g. particle topo + projection topo in the same frame).
+
+var _blurPool = {
+  cellCount: 0,
+  bufA: null,    // ping buffer
+  bufB: null,    // pong buffer
+};
+
+function _ensureBlurPool(cellCount) {
+  if (_blurPool.cellCount === cellCount) return;
+  _blurPool.bufA = new Float32Array(cellCount);
+  _blurPool.bufB = new Float32Array(cellCount);
+  _blurPool.cellCount = cellCount;
+}
+
+
 // computeTopology  —  Main entry point
 // ================================================================
 //
@@ -77,6 +100,9 @@ var TOPO_G_RED    = 3;
 function computeTopology(grids, cols, rows, colorForce) {
   var cellCount = cols * rows;
 
+  // ---- Ensure buffer pool is sized correctly ----
+  _ensureBlurPool(cellCount);
+
   // Default color weights: all equal
   var wG = 1.0, wY = 1.0, wB = 1.0, wR = 1.0;
   if (colorForce) {
@@ -93,15 +119,6 @@ function computeTopology(grids, cols, rows, colorForce) {
   //   elevation (mountains). These are ceilings that push price down.
   // Support light (blue + red from candle lows) = NEGATIVE elevation
   //   (wells). These are floors that push price up.
-  //
-  // This signed field naturally encodes the physics:
-  //   Ridges (positive peaks) = resistance levels
-  //   Valleys (negative troughs) = support levels
-  //   Zero / flat = open space (paths of least resistance)
-  //   Gradient points from resistance toward support = natural price flow
-  //
-  // Color weights from the UI sliders still apply — a channel with
-  // str=0 contributes nothing, str=2 contributes double.
 
   var intensity = new Float32Array(cellCount);
   var gG = grids[TOPO_G_GREEN];
@@ -112,7 +129,6 @@ function computeTopology(grids, cols, rows, colorForce) {
   var maxIntensity = 0;
   var minIntensity = 0;
   for (var i = 0; i < cellCount; i++) {
-    // Resistance is positive, support is negative
     var resist  = gG[i] * wG + gY[i] * wY;
     var support = gB[i] * wB + gR[i] * wR;
     var val = resist - support;
@@ -121,39 +137,81 @@ function computeTopology(grids, cols, rows, colorForce) {
     if (val < minIntensity) minIntensity = val;
   }
 
-  // Also track absolute magnitude for thresholding
   var absMax = Math.max(maxIntensity, -minIntensity);
 
-  // ---- PERCENTILE-BASED REFERENCE ----
-  // Use absolute values so we capture both resistance and support features.
-  var nonZeroVals = [];
-  for (var nzi = 0; nzi < cellCount; nzi++) {
-    var absVal = Math.abs(intensity[nzi]);
-    if (absVal > 0.001) nonZeroVals.push(absVal);
+  // ---- SAMPLED PERCENTILE ----
+  // Instead of pushing all non-zero values into a JS array and sorting
+  // (which at fine res creates a 230K-element array + O(n log n) sort),
+  // sample every Nth cell. At N=8, a 230K grid samples ~29K values.
+  // The 85th percentile estimate is statistically stable at this size.
+  var SAMPLE_STEP = 8;
+  var sampleCount = 0;
+  // Reuse blurA temporarily as sample storage (it gets overwritten by blur next)
+  var sampleBuf = _blurPool.bufA;
+  for (var nzi = 0; nzi < cellCount; nzi += SAMPLE_STEP) {
+    var absVal = intensity[nzi];
+    if (absVal < 0) absVal = -absVal;
+    if (absVal > 0.001) {
+      sampleBuf[sampleCount++] = absVal;
+    }
   }
   var refIntensity = absMax;  // fallback
-  if (nonZeroVals.length > 10) {
-    nonZeroVals.sort(function(a, b) { return a - b; });
-    refIntensity = nonZeroVals[Math.floor(nonZeroVals.length * 0.85)] || absMax;
+  if (sampleCount > 10) {
+    // Partial sort: find the 85th percentile value using a selection
+    // approach — sort only the sampled subset
+    var samples = new Float32Array(sampleBuf.buffer, 0, sampleCount);
+    samples.sort();
+    refIntensity = samples[Math.floor(sampleCount * 0.85)] || absMax;
   }
 
   // ----------------------------------------------------------------
-  // STEP 2: Gaussian blur the intensity to smooth out noise
+  // STEP 2: Gaussian blur — PING-PONG between two pooled buffers
   // ----------------------------------------------------------------
-  // Raw beam accumulation has significant per-pixel noise from
-  // individual beam traces crossing at slightly different angles.
-  // A single 3×3 blur is nowhere near enough — it leaves thousands
-  // of spurious local minima/maxima that all get flagged as features.
-  //
-  // Multi-pass approach: 4 passes of 3×3 Gaussian effectively
-  // creates a ~9×9 kernel with smooth falloff. This eliminates
-  // beam-level noise while preserving the genuine large-scale
-  // S/R structures (which span many cells).
+  // 4 passes of 3×3 Gaussian ≈ 9×9 kernel. No allocations.
+  // Reads from src, writes to dst, then swaps.
+  var blurA = _blurPool.bufA;
+  var blurB = _blurPool.bufB;
 
-  var smoothed = intensity;
+  // Copy intensity into blurA as the starting point
+  blurA.set(intensity);
+
+  var src = blurA;
+  var dst = blurB;
   for (var blurPass = 0; blurPass < 4; blurPass++) {
-    smoothed = gaussianBlur3x3(smoothed, cols, rows);
+    // Interior cells: apply 3×3 kernel
+    for (var y = 1; y < rows - 1; y++) {
+      var rowOff = y * cols;
+      var rowAbove = (y - 1) * cols;
+      var rowBelow = (y + 1) * cols;
+      for (var x = 1; x < cols - 1; x++) {
+        dst[rowOff + x] = (
+          src[rowAbove + x - 1]       + src[rowAbove + x] * 2 + src[rowAbove + x + 1] +
+          src[rowOff   + x - 1] * 2   + src[rowOff   + x] * 4 + src[rowOff   + x + 1] * 2 +
+          src[rowBelow + x - 1]       + src[rowBelow + x] * 2 + src[rowBelow + x + 1]
+        ) * 0.0625;  // 1/16
+      }
+    }
+    // Edge rows/cols: copy from source (unchanged)
+    // First and last row
+    for (var ex = 0; ex < cols; ex++) {
+      dst[ex] = src[ex];
+      dst[(rows - 1) * cols + ex] = src[(rows - 1) * cols + ex];
+    }
+    // First and last column (interior rows only — corners already done)
+    for (var ey = 1; ey < rows - 1; ey++) {
+      dst[ey * cols] = src[ey * cols];
+      dst[ey * cols + cols - 1] = src[ey * cols + cols - 1];
+    }
+
+    // Swap for next pass
+    var tmp = src;
+    src = dst;
+    dst = tmp;
   }
+  // After 4 passes, src points to the final smoothed result.
+  // Copy out of the pool so it survives if computeTopology is called
+  // again this frame (projection.js calls it independently).
+  var smoothed = new Float32Array(src);
 
   // ----------------------------------------------------------------
   // STEP 3: Compute gradient vectors (central differences)

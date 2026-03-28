@@ -154,6 +154,48 @@ function setColorForce(color, prop, value) {
   drawFrame();
 }
 
+
+// Set a particle physics parameter from the wind tunnel controls.
+// param: "candleAttract", "repulsion", or "size"
+// value: string from the HTML slider (0..200 for forces, 10..120 for size)
+function setParticleParam(param, value) {
+  var num = parseFloat(value);
+  if (param === "repulsion") {
+    // Slider 0..200 → 0..2.0
+    var scaled = num / 100;
+    var valEl = document.getElementById("particle-repulse-val");
+    if (valEl) valEl.textContent = scaled.toFixed(2);
+    if (window.gpuParticles && window.gpuParticles.setParam) {
+      window.gpuParticles.setParam("repulsion", scaled);
+    }
+  } else if (param === "size") {
+    // Slider 10..120 → 1.0..12.0
+    var scaled = num / 10;
+    var valEl = document.getElementById("particle-size-val");
+    if (valEl) valEl.textContent = scaled.toFixed(1);
+    if (window.gpuParticles && window.gpuParticles.setParam) {
+      window.gpuParticles.setParam("size", scaled);
+    }
+  } else if (param === "candleAttract") {
+    // Slider 0..200 → 0..2.0
+    var scaled = num / 100;
+    var valEl = document.getElementById("candle-attract-val");
+    if (valEl) valEl.textContent = scaled.toFixed(2);
+    if (window.gpuParticles && window.gpuParticles.setParam) {
+      window.gpuParticles.setParam("candleAttract", scaled);
+    }
+  }
+}
+
+// Toggle the attractor debug overlay on/off.
+// When on, draws the exact attractor zones that the particle
+// physics step uses — so you can verify alignment with candles.
+function toggleAttractorDebug() {
+  state.showAttractorDebug = !state.showAttractorDebug;
+  setActive("btn-show-attractors", state.showAttractorDebug);
+  drawFrame();
+}
+
 // Toggle a prediction model component on/off.
 // name: "Light", "MA", "RSI", "Vol", "LSR"
 function togglePred(name) {
@@ -287,6 +329,12 @@ function updateToolbar() {
   var cfBar = document.getElementById("color-force-bar");
   if (cfBar) {
     cfBar.style.display = state.showProjection ? "flex" : "none";
+  }
+
+  // Particle physics controls (only in wind tunnel mode)
+  var particleBar = document.getElementById("particle-controls-bar");
+  if (particleBar) {
+    particleBar.style.display = (state.mode === "particle") ? "flex" : "none";
   }
 
   // Prediction model toggles (only when projection is on)
