@@ -65,12 +65,22 @@ function drawCrosshair() {
   var visTopWorld    = -state.viewOffsetY / state.viewScale;
   var visBotWorld    = (screenH - state.viewOffsetY) / state.viewScale;
 
+  // Clamp to world/chart boundaries. At zoom < 1.0 the viewport
+  // extends PAST the world edges, so visBotWorld can be hundreds of
+  // pixels below the actual chart — the time pill would render in
+  // invisible space. Clamping keeps UI elements on screen.
+  if (visTopWorld < dims.chartTop) visTopWorld = dims.chartTop;
+  if (visBotWorld > dims.chartTop + dims.chartHeight) visBotWorld = dims.chartTop + dims.chartHeight;
+  if (visLeftWorld < dims.chartLeft) visLeftWorld = dims.chartLeft;
+  if (visRightWorld > dims.width) visRightWorld = dims.width;
+
   // Bounds check: the crosshair works anywhere in the world that has
   // chart data (the full world area, not just the screen-sized portion).
   if (mx < dims.chartLeft || mx > dims.width - 10) return;
   if (my < dims.chartTop  || my > dims.chartTop + dims.chartHeight) return;
 
   ctx.save();
+  ctx.globalAlpha = 1.0;  // ensure full visibility — prior rendering may leave alpha low
 
   // Inverse scale: UI elements drawn at basePx * invS appear as
   // basePx on screen regardless of zoom level. Applied to text,
@@ -195,6 +205,39 @@ function drawCrosshair() {
       }
     } else {
       timeStr = "+" + projStep + " candles";
+    }
+  }
+
+  // ---- FALLBACK: if no time string was computed, derive from position ----
+  // This catches edge cases where the candle lookup fails silently.
+  // Log a diagnostic so we can track down the root cause.
+  if (!timeStr && candles && candles.length > 0) {
+    var fbIdx = Math.floor((mx - dims.chartLeft) / candleW);
+    if (fbIdx >= 0 && fbIdx < candles.length && candles[fbIdx] && candles[fbIdx].time) {
+      var fbD = new Date(candles[fbIdx].time);
+      timeStr = (fbD.getMonth()+1) + "/" + fbD.getDate() + " "
+              + (fbD.getHours() < 10 ? "0" : "") + fbD.getHours() + ":"
+              + (fbD.getMinutes() < 10 ? "0" : "") + fbD.getMinutes();
+      console.warn("[Crosshair] Fallback time used at mx=" + mx.toFixed(0)
+        + " candleRightEdge=" + candleRightEdge.toFixed(0)
+        + " chartLeft=" + dims.chartLeft
+        + " candleW=" + candleW.toFixed(2)
+        + " candles.length=" + candles.length
+        + " CONFIG.CANDLE_COUNT=" + CONFIG.CANDLE_COUNT);
+    } else if (fbIdx >= candles.length && candles[candles.length - 1] && candles[candles.length - 1].time) {
+      // Cursor is past the last candle — show projection time
+      inProjection = true;
+      var fbStep = fbIdx - candles.length + 1;
+      if (candleIntervalMs > 0) {
+        var fbLast = candles[candles.length - 1].time;
+        var fbProjTime = new Date(fbLast + fbStep * candleIntervalMs);
+        timeStr = (fbProjTime.getMonth()+1) + "/" + fbProjTime.getDate() + " "
+                + (fbProjTime.getHours() < 10 ? "0" : "") + fbProjTime.getHours() + ":"
+                + (fbProjTime.getMinutes() < 10 ? "0" : "") + fbProjTime.getMinutes()
+                + " (+" + fbStep + ")";
+      } else {
+        timeStr = "+" + fbStep + " candles";
+      }
     }
   }
 
@@ -2342,12 +2385,12 @@ var _cgFetchState = {
 // Fetch candle data (Phase 1) for a single asset.
 // Stores results directly into candleData[assetKey].
 // Returns true on success, false on failure.
-async function cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl) {
+async function cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl, silent) {
   var coinId = CG_COIN_IDS[assetKey];
   if (!coinId) return false;
 
   if (isMultiRes) {
-    showLoading("Fetching " + assetKey + " (multi-res CG)…");
+    if (!silent) showLoading("Fetching " + assetKey + " (multi-res CG)…");
 
     statusEl.textContent = "Fetching " + assetKey + " (4h layer)...";
     var layer4h = await cgFetchCandles(coinId, 30, 4 * 60 * 60000);
@@ -2372,7 +2415,7 @@ async function cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl) {
       if (!candleData[assetKey]) return false;
     }
   } else {
-    showLoading("Fetching " + assetKey + " from CoinGecko…");
+    if (!silent) showLoading("Fetching " + assetKey + " from CoinGecko…");
     statusEl.textContent = "Fetching " + assetKey + "...";
 
     var candles = await cgFetchCandles(coinId, cgRange.days, cgRange.targetMs);
@@ -2398,7 +2441,7 @@ async function cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl) {
 
 // Fetch background layers (Phase 2) for a single asset.
 // Stores results directly into backgroundData[assetKey].
-async function cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl) {
+async function cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl, silent) {
   var coinId = CG_COIN_IDS[assetKey];
   if (!coinId) return;
 
@@ -2420,7 +2463,7 @@ async function cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl) {
   }
   if (needBgDaily) {
     statusEl.textContent = "Fetching " + assetKey + " daily bg...";
-    showLoading("Fetching " + assetKey + " background…");
+    if (!silent) showLoading("Fetching " + assetKey + " background…");
     bgDaily = await cgFetchCandlesLight(coinId, 90, 24 * 60 * 60000);
     await cgDelay();
   }
@@ -2621,12 +2664,12 @@ async function cgFetchRemainingAssets(primaryAsset, cgRange, isMultiRes) {
 
   for (var i = 0; i < remaining.length; i++) {
     var assetKey = remaining[i];
-    var ok = await cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl);
+    var ok = await cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl, true);
     if (!ok) {
       console.warn("[CG] Background fetch failed for " + assetKey);
       continue;
     }
-    await cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl);
+    await cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl, true);
   }
 
   _cgFetchState.bgFetching = false;
@@ -2711,7 +2754,7 @@ async function cgAutoRefreshCheck() {
       console.log("[CG] Auto-refreshing " + assetKey + " (stale by "
         + Math.round((now - lastFetch) / 1000) + "s)");
 
-      var ok = await cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl);
+      var ok = await cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl, true);
       if (ok) {
         // Update CANDLE_COUNT if this is the primary asset
         if (assetKey === state.asset) {
@@ -2719,7 +2762,7 @@ async function cgAutoRefreshCheck() {
         }
 
         // Refresh background data too
-        await cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl);
+        await cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl, true);
 
         // Re-precompute visibility pairs for the refreshed asset
         if (candleData[assetKey] && candleData[assetKey].length > 0) {

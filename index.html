@@ -145,6 +145,7 @@
       align-items: center;
       flex-direction: column;
       gap: 16px;
+      pointer-events: none;  /* canvas stays interactive during loads */
     }
     #loading-overlay.visible {
       display: flex;
@@ -464,6 +465,7 @@
     <button class="btn" id="btn-contours" onclick="toggleContours()" style="font-size:10px; padding:3px 8px;">◎ Contours</button>
     <button class="btn" id="btn-contour-fill" onclick="toggleContourFill()" style="font-size:10px; padding:3px 8px;">▦ Topo Fill</button>
     <button class="btn" id="btn-corridors" onclick="toggleCorridorViz()" style="font-size:10px; padding:3px 8px;">🫠 Corridors</button>
+    <button class="btn active" id="btn-proj-info" onclick="toggleProjInfo()" style="font-size:10px; padding:3px 8px;">ℹ Proj Info</button>
   </div>
 
   <div id="canvas-wrap">

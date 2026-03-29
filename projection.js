@@ -4381,6 +4381,7 @@ function renderProjection(projData, dims, projDims, priceMin, priceMax) {
   }
 
   // Label consensus points (with accuracy % shown)
+  if (state.showProjInfo) {
   var labelIdxs = [0, Math.floor(consensus.length / 2), consensus.length - 1];
   var cpInvS = 1 / state.viewScale;
   for (var li = 0; li < labelIdxs.length; li++) {
@@ -4411,6 +4412,7 @@ function renderProjection(projData, dims, projDims, priceMin, priceMax) {
     ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
     ctx.fill();
   }
+  } // end showProjInfo — consensus labels
 
   // ---- Endpoint histogram on the right edge ----
   var histW = Math.min(40, projDims.projWidth * 0.3);
@@ -4443,10 +4445,12 @@ function renderProjection(projData, dims, projDims, priceMin, priceMax) {
     ctx.closePath();
     ctx.fill();
 
-    ctx.fillStyle = "rgba(255,255,255,0.8)";
-    ctx.font = "bold " + Math.round(9 * tdInvS) + "px monospace";
-    ctx.textAlign = "right";
-    ctx.fillText(tgt.price.toFixed(2) + " " + confPct + "%", dx - 6, ty + 3 * tdInvS);
+    if (state.showProjInfo) {
+      ctx.fillStyle = "rgba(255,255,255,0.8)";
+      ctx.font = "bold " + Math.round(9 * tdInvS) + "px monospace";
+      ctx.textAlign = "right";
+      ctx.fillText(tgt.price.toFixed(2) + " " + confPct + "%", dx - 6, ty + 3 * tdInvS);
+    }
 
     ctx.strokeStyle = "rgba(255,255,255," + (0.06 + tgt.strength * 0.12).toFixed(3) + ")";
     ctx.lineWidth = 0.5;
@@ -4459,14 +4463,10 @@ function renderProjection(projData, dims, projDims, priceMin, priceMax) {
   }
 
   // ---- PROJECTION ZONE TEXT OVERLAY ----
-  // Clean, human-readable labels that stay legible at any zoom level.
-  // All font sizes and positioning are counter-scaled by 1/viewScale
-  // so they appear at a constant screen size.
-  //
-  // POSITIONING: Text is anchored to the VISIBLE viewport top, not
-  // the world top. This way the labels are always on screen regardless
-  // of zoom level or pan position. We inverse-transform the screen
-  // edges to get world coordinates for positioning.
+  // Controlled by state.showProjInfo — toggle hides ALL text labels
+  // (header, direction, target, confidence, accuracy sparkline, stats)
+  // while keeping the visual elements (lines, candles, histogram, diamonds).
+  if (state.showProjInfo) {
 
   var invS = 1 / state.viewScale;
   var midX = projLeft + projDims.projWidth / 2;
@@ -4665,6 +4665,8 @@ function renderProjection(projData, dims, projDims, priceMin, priceMax) {
     ctx.textAlign = "center";
     ctx.fillText(calLabel, labelX, visBot - 6 * invS);
   }
+
+  } // end showProjInfo — text overlay
 
   // ---- PROJECTED MA LINE (continuation into prediction zone) ----
   // Same orange/gold dashed style as the real chart's MA overlay.

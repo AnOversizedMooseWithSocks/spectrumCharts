@@ -98,6 +98,7 @@ var state = {
 
   // -- Projection zone --
   showProjection: true,
+  showProjInfo:   true,   // show text overlay in projection zone (direction, target, accuracy)
   projCandles:    25,
 
   // -- Color force settings for projection --

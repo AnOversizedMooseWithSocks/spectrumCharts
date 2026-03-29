@@ -257,6 +257,13 @@ function toggleCorridorViz() {
   drawFrame();
 }
 
+// Toggle projection info text overlay (direction, target, accuracy, etc.)
+function toggleProjInfo() {
+  state.showProjInfo = !state.showProjInfo;
+  updateToolbar();
+  drawFrame();
+}
+
 // Set the intensity weighting mode (MA or RSI based).
 function setIntensityMode(mode) {
   state.intensityMode = mode;
@@ -386,6 +393,10 @@ function updateToolbar() {
   var corrVizBtn = document.getElementById("btn-corridors");
   if (corrVizBtn) {
     setActive("btn-corridors", state.showCorridors);
+  }
+  var projInfoBtn = document.getElementById("btn-proj-info");
+  if (projInfoBtn) {
+    setActive("btn-proj-info", state.showProjInfo);
   }
 
   // Show/hide raycast-specific controls (only in raycast mode)

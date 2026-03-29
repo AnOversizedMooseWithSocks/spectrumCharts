@@ -253,8 +253,12 @@ function _cpuPhysicsStep() {
     var randY = (rngState & 0xFFFF) * 0.0000152587890625 - 0.5;
 
     // Boundary recycling — respawn at left edge for wind tunnel flow
+    // Right/left margins: generous so particles fully exit before respawn.
+    // Top/bottom: tight (0px) since the post-integration check below
+    // handles the exact-edge case. This catches particles that spawn
+    // out of bounds or get nudged past the edge by forces.
     if (px > worldW + 10 || px < chartLeft - 40 ||
-        py < chartTop - 30 || py > chartBot + 30) {
+        py < chartTop || py > chartBot) {
       px = chartLeft + Math.random() * worldRange * 0.15;
       py = chartTop + Math.random() * chartH;
       vx = 0.6 + Math.random() * 2.0;
@@ -355,8 +359,16 @@ function _cpuPhysicsStep() {
       vx *= scale; vy *= scale;
     }
     px += vx; py += vy;
-    if (py < chartTop) { py = chartTop; vy = Math.abs(vy) * 0.3; }
-    if (py > chartBot) { py = chartBot; vy = -Math.abs(vy) * 0.3; }
+
+    // Top/bottom edge: recycle to left edge instead of clamping.
+    // Clamping causes particles to cluster along the boundary.
+    // Recycling keeps the flow clean and avoids edge buildup.
+    if (py < chartTop || py > chartBot) {
+      px = chartLeft + Math.random() * worldRange * 0.15;
+      py = chartTop + Math.random() * chartH;
+      vx = 0.6 + Math.random() * 2.0;
+      vy = (Math.random() - 0.5) * 0.8;
+    }
 
     posArr[off] = px; posArr[off + 1] = py;
     velArr[off] = vx; velArr[off + 1] = vy;
