@@ -197,7 +197,7 @@
 
     <div class="slider-group" id="res-group">
       <span class="toolbar-label">RES</span>
-      <input type="range" class="slider-input" id="res-slider" min="1" max="6" step="1" value="2"
+      <input type="range" class="slider-input" id="res-slider" min="1" max="6" step="1" value="4"
              oninput="setResolution(+this.value)">
     </div>
 
@@ -451,6 +451,12 @@
     </div>
     <button class="btn active" id="btn-pred-topo"    onclick="togglePred('Topo')"    style="font-size:10px; padding:3px 8px;">🗺 Topo</button>
     <button class="btn active" id="btn-pred-corridor" onclick="togglePred('Corridor')" style="font-size:10px; padding:3px 8px;">🫠 Corridor</button>
+    <div class="slider-group" id="color-bias-group" style="margin-left:-4px;">
+      <label style="font-size:9px; color:#8892a4; margin-right:2px;">S/R Bias</label>
+      <input type="range" style="width:40px; accent-color:#66ccff;" min="0" max="100" step="5" value="25"
+             id="color-bias-slider" oninput="setColorBiasForce(+this.value)">
+      <span class="slider-val" id="color-bias-val" style="min-width:24px;">25%</span>
+    </div>
     <span style="width:1px; height:14px; background:rgba(255,255,255,0.12); margin:0 2px;"></span>
     <button class="btn active" id="btn-pred-intrev"   onclick="togglePred('IntRev')"   style="font-size:10px; padding:3px 8px;">💥 Int Rev</button>
     <button class="btn active" id="btn-pred-minstep"  onclick="togglePred('MinStep')"  style="font-size:10px; padding:3px 8px;">⬇ Min Step</button>
@@ -480,8 +486,9 @@
   <script src="coords.js"></script>       <!-- price-to-pixel mapping, chart dims -->
   <script src="drawing.js"></script>      <!-- drawCandles, drawGrid, crossForces -->
   <script src="sightlines.js"></script>   <!-- build + render sight lines, background S/R -->
-  <script src="webgl-heatmap.js"></script><!-- GPU-accelerated heatmap rendering -->
-  <script src="gl-beams.js"></script>    <!-- GPU beam accumulation (Phase 2) -->
+  <script src="webgl-heatmap.js"></script><!-- GPU-accelerated heatmap rendering (fallback) -->
+  <script src="gl-beams.js"></script>    <!-- GPU beam accumulation (fallback) -->
+  <script src="gl-pipeline.js"></script> <!-- Unified GPU pipeline: segmented beams + direct FBO display -->
   <script src="heatmap.js"></script>      <!-- build + render raycast heatmap -->
   <script src="calibrate-indicators.js"></script> <!-- MA/RSI physics calibration from background data -->
   <script src="regime.js"></script>             <!-- directional regime detection & 3-path prediction -->

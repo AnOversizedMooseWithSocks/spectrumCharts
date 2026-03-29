@@ -475,6 +475,8 @@ function stepParticles(pool, candles, dims, crossForces, topo, topoRes) {
 
   // Topology typed array locals (avoid repeated topo.xxx in hot loop)
   var topoIntensity = hasTopo ? topo.intensity : null;
+  var topoColorBias = hasTopo ? topo.colorBias : null;  // signed: +support / -resistance
+  var topoMaxBias   = hasTopo ? (topo.maxBias || 1) : 1;
   var topoGradX     = hasTopo ? topo.gradX : null;
   var topoGradY     = hasTopo ? topo.gradY : null;
   var topoGradMag   = hasTopo ? topo.gradMag : null;
@@ -487,6 +489,7 @@ function stepParticles(pool, candles, dims, crossForces, topo, topoRes) {
   var HILL_BRAKE     = 0.08;
   var DOWNHILL_BOOST = 0.10;
   var RIDGE_DEFLECT  = 0.40;
+  var COLOR_BIAS_FORCE = state.colorBiasForce || 0.25;  // from UI slider
 
   // ---- Spatial grid for repulsion ----
   var sg = buildSpatialGrid(pool, width, height);
@@ -588,6 +591,27 @@ function stepParticles(pool, candles, dims, crossForces, topo, topoRes) {
         // Valley boost
         if (topoValleys[tIdx]) {
           fx += 0.08;
+        }
+
+        // ---- Color bias directional force ----
+        // The color bias tells us which type of pressure dominates here:
+        //   Positive bias = support-dominated → pushes price UP (Y decreases)
+        //   Negative bias = resistance-dominated → pushes price DOWN (Y increases)
+        // This force is proportional to the local pressure intensity —
+        // strong light with a clear bias pushes harder than dim light.
+        // Only applies where there's meaningful pressure (not empty space).
+        if (topoColorBias) {
+          var bias = topoColorBias[tIdx];
+          var localPressure = topoIntensity[tIdx];
+          if (localPressure > 0.01) {
+            // Normalize bias to -1..+1 range, scale by local pressure
+            var normBias = bias / topoMaxBias;
+            var pressureScale = localPressure / (topo.refIntensity || 1);
+            if (pressureScale > 1) pressureScale = 1;
+            // Support (positive bias) pushes particles UP (negative Y)
+            // Resistance (negative bias) pushes particles DOWN (positive Y)
+            fy -= normBias * pressureScale * COLOR_BIAS_FORCE;
+          }
         }
       }
     }

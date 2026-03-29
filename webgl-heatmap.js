@@ -65,19 +65,13 @@ var FS_SOURCE = [
   "",
   "out vec4 fragColor;",
   "",
-  "// Map normalized intensity to a color-scaled value.",
-  "// Same ramp as the old renderHeatmap:",
-  "//   < 1.0: dim to medium (base color × intensity × 0.4)",
-  "//   >= 1.0: push toward white (hot zone glow)",
+  "// Map normalized intensity to a color-scaled contribution.",
+  "// Scales the base color proportionally — NO push toward white.",
+  "// This preserves hue at any brightness; tone mapping (below)",
+  "// handles the compression into displayable range after the",
+  "// additive sum of all 4 channels.",
   "vec3 applyRamp(float intensity, vec3 baseCol) {",
-  "  intensity = min(intensity, 3.0);",
-  "  if (intensity < 1.0) {",
-  "    return baseCol * intensity * 0.4;",
-  "  } else {",
-  "    float excess = min((intensity - 1.0) / 2.0, 1.0);",
-  "    vec3 full = baseCol * 0.4;",
-  "    return full + excess * (vec3(1.0) - full);",
-  "  }",
+  "  return baseCol * intensity * 0.4;",
   "}",
   "",
   "void main() {",
@@ -116,6 +110,10 @@ var FS_SOURCE = [
   "         + applyRamp(redVal, cRed);",
   "  }",
   "",
+  "  // Tone mapping: Reinhard per-channel compresses any brightness",
+  "  // into 0..1 while preserving the ratio between channels (= hue).",
+  "  // The 1.6 gain compensates for Reinhard dimming low values.",
+  "  color = color / (1.0 + color) * 1.6;",
   "  color = min(color, vec3(1.0));",
   "  fragColor = vec4(color, 0.6);",
   "}",
@@ -280,6 +278,17 @@ function renderHeatmapGL(hmData, accentHex, refVal, mainCtx) {
 }
 
 
+// Pooled resources for renderHeatmapImageData — reused across frames
+// to avoid allocating a new canvas element + ImageData every frame
+var _hmImgPool = {
+  canvas: null,
+  ctx:    null,
+  img:    null,
+  cols:   0,
+  rows:   0,
+};
+
+
 // ----------------------------------------------------------------
 // IMAGEDATA FALLBACK
 // ----------------------------------------------------------------
@@ -293,9 +302,22 @@ function renderHeatmapImageData(hmData, accentHex, refVal, mainCtx) {
   var rows = hmData.rows;
   var resolution = state.heatmapRes;
 
-  // Create an ImageData at grid resolution (cols × rows pixels)
-  var imgData = new ImageData(cols, rows);
-  var pixels = imgData.data;  // Uint8ClampedArray [R,G,B,A, R,G,B,A, ...]
+  // Pool ImageData — only reallocate when grid size changes
+  if (_hmImgPool.cols !== cols || _hmImgPool.rows !== rows) {
+    _hmImgPool.img = new ImageData(cols, rows);
+    _hmImgPool.canvas = document.createElement("canvas");
+    _hmImgPool.canvas.width = cols;
+    _hmImgPool.canvas.height = rows;
+    _hmImgPool.ctx = _hmImgPool.canvas.getContext("2d");
+    _hmImgPool.cols = cols;
+    _hmImgPool.rows = rows;
+  }
+  var imgData = _hmImgPool.img;
+  var pixels = imgData.data;
+
+  // Clear previous frame's pixel data (ImageData is reused)
+  var pxBuf32 = new Uint32Array(pixels.buffer);
+  for (var pz = 0; pz < pxBuf32.length; pz++) pxBuf32[pz] = 0;
 
   var invRef = 1.0 / refVal;
 
@@ -335,30 +357,25 @@ function renderHeatmapImageData(hmData, accentHex, refVal, mainCtx) {
         g = ag * scale;
         b = ab * scale;
       } else {
-        // Additive blend of all 4 color channels
+        // Additive blend of all 4 color channels.
+        // Each channel contributes its base color scaled by intensity,
+        // NO push toward white — hue is preserved at any brightness.
         for (var gi = 0; gi < 4; gi++) {
           var v = vals[gi];
           if (v < 0.01) continue;
-          var intensity = v < 3.0 ? v : 3.0;
-          var cr, cg, cb;
-          if (intensity < 1.0) {
-            cr = baseR[gi] * intensity * 0.4;
-            cg = baseG[gi] * intensity * 0.4;
-            cb = baseB[gi] * intensity * 0.4;
-          } else {
-            var excess = (intensity - 1.0) / 2.0;
-            if (excess > 1.0) excess = 1.0;
-            var fr = baseR[gi] * 0.4;
-            var fg = baseG[gi] * 0.4;
-            var fb = baseB[gi] * 0.4;
-            cr = fr + excess * (255 - fr);
-            cg = fg + excess * (255 - fg);
-            cb = fb + excess * (255 - fb);
-          }
-          r += cr;
-          g += cg;
-          b += cb;
+          // Scale base color proportionally (matches GPU applyRamp)
+          r += baseR[gi] * v * 0.4;
+          g += baseG[gi] * v * 0.4;
+          b += baseB[gi] * v * 0.4;
         }
+
+        // Reinhard tone mapping per-channel: compresses any brightness
+        // into 0..255 range while preserving the ratios between channels
+        // (which is what makes a color look like that color).
+        // 1.6 gain compensates for Reinhard dimming at low values.
+        r = r / (1.0 + r / 255.0) * 1.6;
+        g = g / (1.0 + g / 255.0) * 1.6;
+        b = b / (1.0 + b / 255.0) * 1.6;
       }
 
       // Clamp and write
@@ -369,19 +386,14 @@ function renderHeatmapImageData(hmData, accentHex, refVal, mainCtx) {
     }
   }
 
-  // Draw at grid resolution, then the canvas scales it up
-  // Use a temporary small canvas to avoid affecting the main canvas size
-  var tmpCanvas = document.createElement("canvas");
-  tmpCanvas.width = cols;
-  tmpCanvas.height = rows;
-  var tmpCtx = tmpCanvas.getContext("2d");
-  tmpCtx.putImageData(imgData, 0, 0);
+  // Put into pooled canvas (reused across frames) and scale up
+  _hmImgPool.ctx.putImageData(imgData, 0, 0);
 
   // Draw scaled up onto the main canvas with additive blending
   mainCtx.save();
   mainCtx.globalCompositeOperation = "lighter";
   mainCtx.imageSmoothingEnabled = false;
-  mainCtx.drawImage(tmpCanvas, 0, 0, cols, rows,
+  mainCtx.drawImage(_hmImgPool.canvas, 0, 0, cols, rows,
                     0, 0, cols * resolution, rows * resolution);
   mainCtx.restore();
 }

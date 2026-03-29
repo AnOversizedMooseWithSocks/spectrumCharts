@@ -53,6 +53,53 @@ function beamGridIdx(side, y1, y2) {
 }
 
 
+// O(n) percentile computation using histogram binning.
+// Replaces the O(n log n) sort that used to run EVERY FRAME in
+// renderHeatmap. Now called once at build time, result cached.
+function _computeRefVal(grids, cellCount) {
+  var BIN_COUNT = 1024;
+
+  // Pass 1: find max across all 4 grids
+  var maxVal = 0;
+  for (var gi = 0; gi < 4; gi++) {
+    var g = grids[gi];
+    for (var i = 0; i < cellCount; i++) {
+      if (g[i] > maxVal) maxVal = g[i];
+    }
+  }
+  if (maxVal < 0.01) return 1.0;
+
+  // Pass 2: bin all non-zero values into histogram
+  var bins = new Uint32Array(BIN_COUNT);
+  var scale = (BIN_COUNT - 1) / maxVal;
+  var totalNonZero = 0;
+
+  for (var gi2 = 0; gi2 < 4; gi2++) {
+    var g2 = grids[gi2];
+    for (var i2 = 0; i2 < cellCount; i2++) {
+      var v = g2[i2];
+      if (v > 0.01) {
+        bins[(v * scale) | 0]++;
+        totalNonZero++;
+      }
+    }
+  }
+  if (totalNonZero === 0) return 1.0;
+
+  // Walk bins to find 85th percentile
+  var target = Math.floor(totalNonZero * 0.85);
+  var cumulative = 0;
+  for (var b = 0; b < BIN_COUNT; b++) {
+    cumulative += bins[b];
+    if (cumulative >= target) {
+      var refVal = (b + 0.5) / scale;
+      return refVal * 2.0;  // include 2× display dimming factor
+    }
+  }
+  return maxVal * 2.0;
+}
+
+
 function buildHeatmap(candles, dims, resolution, assetKey, precomputedSlData, lockedRange) {
   var t0 = performance.now();
   var w = dims.width;
@@ -374,7 +421,7 @@ function buildHeatmap(candles, dims, resolution, assetKey, precomputedSlData, lo
 
   var gpuDone = false;
 
-  if (typeof gpuPaintBeams === "function" && glBeams && glBeams.ready) {
+  if (typeof gpuAccumBeams === "function" && glPipeline && glPipeline.ready) {
 
     // ---- Helper: apply LENGTH→GLOW to a raw intensity ----
     // Same formula as inside paintBeam, extracted so we can
@@ -491,11 +538,23 @@ function buildHeatmap(candles, dims, resolution, assetKey, precomputedSlData, lo
         bi++;
       }
 
-      // ---- Send to GPU ----
-      gpuDone = gpuPaintBeams(beamData, bi, occGrid, cols, rows, opacity, grids);
+      // ---- Segment beams on CPU ----
+      // Walks each beam along its TRUE path, splitting at candle
+      // crossings. This is correct for angled beams (the attenuation
+      // texture approach only works for horizontal beams).
+      // Cost: ~10-25ms at res=1. Combined with all other fixes
+      // (cached refVal, contour cache, topology cache, histogram
+      // percentiles, pooled arrays), total frame time is acceptable.
+      var candleStepHint = (chartWidth / CONFIG.CANDLE_COUNT) / resolution;
+      var segResult = segmentBeams(beamData, bi, occGrid, cols, rows, opacity, candleStepHint);
+
+      // ---- Render segments on GPU (trivial fragment shader) ----
+      gpuDone = gpuAccumBeams(segResult.segments, segResult.count, occGrid, cols, rows);
 
       if (gpuDone) {
-        console.log("[Phase2] GPU painted " + bi + " beams (" + bgPairList.length + " bg pairs)");
+        gpuReadbackGrids(grids);
+        console.log("[Pipeline] " + bi + " beams → " + segResult.count
+          + " segments (" + bgPairList.length + " bg pairs)");
       }
     }
   }
@@ -576,7 +635,11 @@ function buildHeatmap(candles, dims, resolution, assetKey, precomputedSlData, lo
     : " [CPU computed]";
   console.log("[buildHeatmap] " + assetKey + ": " + (tEnd - t0).toFixed(1) + "ms" + pathLabel);
 
-  return { grids: grids, cols: cols, rows: rows, occGrid: occGrid, paintBeam: paintBeam };
+  // Pre-compute refVal (85th percentile for normalization).
+  // Cached here so renderHeatmap doesn't sort every frame.
+  var refVal = _computeRefVal(grids, cellCount);
+
+  return { grids: grids, cols: cols, rows: rows, occGrid: occGrid, paintBeam: paintBeam, refVal: refVal, resolution: resolution };
 }
 
 
@@ -588,36 +651,34 @@ function buildHeatmap(candles, dims, resolution, assetKey, precomputedSlData, lo
 // never uses the old fillRect approach (~100-300ms).
 
 function renderHeatmap(hm, accentHex) {
-  var hmGrids = hm.grids;
   var cols = hm.cols;
   var rows = hm.rows;
-  var cellCount = cols * rows;
 
-  // Find normalization reference (85th percentile across all 4 grids).
-  // This is fast — just collecting and sorting non-zero values.
-  var nonZero = [];
-  for (var gi = 0; gi < 4; gi++) {
-    var g = hmGrids[gi];
-    for (var i = 0; i < cellCount; i++) {
-      if (g[i] > 0.01) nonZero.push(g[i]);
+  // Use pre-computed refVal from buildHeatmap (cached, zero cost).
+  // Only recompute if V.Beams modified the grids after build.
+  var refVal = hm.refVal;
+  if (!refVal) {
+    refVal = _computeRefVal(hm.grids, cols * rows);
+    hm.refVal = refVal;
+  }
+
+  // Use the resolution the grids were built at (may be capped by
+  // PHYSICS_RES_MIN). cols * resolution gives the screen area to cover.
+  var resolution = hm.resolution || state.heatmapRes;
+
+  // Try unified GPU pipeline (reads beam FBO directly, no readback)
+  if (typeof gpuDisplayHeatmap === "function" && glPipeline && glPipeline.ready) {
+    if (!state.predVBeam || !state.showProjection) {
+      if (gpuDisplayHeatmap(ctx, cols * resolution, rows * resolution,
+                            refVal, accentHex)) return;
     }
   }
-  if (nonZero.length === 0) return;
 
-  nonZero.sort(function(a, b) { return a - b; });
-  var refVal = nonZero[Math.floor(nonZero.length * 0.85)] || 1;
-
-  // Scale refVal up to reduce visual intensity. The grid data stays at
-  // full strength for the prediction engine's force field calculations.
-  // Only the DISPLAY is dimmed — prevents color blowout to white where
-  // many beams stack additively, preserving distinct color information.
-  refVal *= 2.0;
-
-  // Try WebGL first
+  // Try old WebGL path
   if (glHeatmap.ready) {
     if (renderHeatmapGL(hm, accentHex, refVal, ctx)) return;
   }
 
-  // Fall back to ImageData (still ~50x faster than fillRect)
+  // CPU fallback (also used for V.Beams — reads modified CPU grids)
   renderHeatmapImageData(hm, accentHex, refVal, ctx);
 }

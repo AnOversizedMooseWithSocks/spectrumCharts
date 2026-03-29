@@ -113,105 +113,175 @@ function computeTopology(grids, cols, rows, colorForce) {
   }
 
   // ----------------------------------------------------------------
-  // STEP 1: Combine channels into a SIGNED elevation field
+  // STEP 1: Combine channels into TOTAL PRESSURE elevation field
+  //         plus a separate COLOR BIAS directional field
   // ----------------------------------------------------------------
-  // Resistance light (green + yellow from candle highs) = POSITIVE
-  //   elevation (mountains). These are ceilings that push price down.
-  // Support light (blue + red from candle lows) = NEGATIVE elevation
-  //   (wells). These are floors that push price up.
+  // ELEVATION (unsigned): total light intensity across all 4 channels.
+  //   More light of ANY color = more pressure = higher terrain.
+  //   No light = no pressure = low ground (paths of least resistance).
+  //   Particles navigate through low-pressure corridors between
+  //   pressure zones regardless of whether those zones are S or R.
+  //
+  // COLOR BIAS (signed): which direction the pressure pushes.
+  //   Positive = support-dominated (blue+red > green+yellow) → pushes UP
+  //   Negative = resistance-dominated (green+yellow > blue+red) → pushes DOWN
+  //   This is a separate force applied to particles on top of terrain
+  //   avoidance. The terrain says "avoid pressure zones"; the bias says
+  //   "if you're IN a pressure zone, this is which way it pushes you."
 
   var intensity = new Float32Array(cellCount);
+  var colorBias = new Float32Array(cellCount);  // NEW: directional force field
   var gG = grids[TOPO_G_GREEN];
   var gY = grids[TOPO_G_YELLOW];
   var gB = grids[TOPO_G_BLUE];
   var gR = grids[TOPO_G_RED];
 
   var maxIntensity = 0;
-  var minIntensity = 0;
+  var minIntensity = 0;      // will always be 0 (unsigned)
+  var maxBias = 0;           // track bias range for normalization
   for (var i = 0; i < cellCount; i++) {
     var resist  = gG[i] * wG + gY[i] * wY;
     var support = gB[i] * wB + gR[i] * wR;
-    var val = resist - support;
-    intensity[i] = val;
-    if (val > maxIntensity) maxIntensity = val;
-    if (val < minIntensity) minIntensity = val;
+    var total   = resist + support;           // unsigned total pressure
+    var bias    = support - resist;           // signed directional push
+
+    intensity[i] = total;
+    colorBias[i] = bias;
+
+    if (total > maxIntensity) maxIntensity = total;
+    var absBias = bias < 0 ? -bias : bias;
+    if (absBias > maxBias) maxBias = absBias;
   }
 
-  var absMax = Math.max(maxIntensity, -minIntensity);
+  var absMax = maxIntensity;  // unsigned, so absMax == maxIntensity
 
-  // ---- SAMPLED PERCENTILE ----
-  // Instead of pushing all non-zero values into a JS array and sorting
-  // (which at fine res creates a 230K-element array + O(n log n) sort),
-  // sample every Nth cell. At N=8, a 230K grid samples ~29K values.
-  // The 85th percentile estimate is statistically stable at this size.
-  var SAMPLE_STEP = 8;
-  var sampleCount = 0;
-  // Reuse blurA temporarily as sample storage (it gets overwritten by blur next)
-  var sampleBuf = _blurPool.bufA;
-  for (var nzi = 0; nzi < cellCount; nzi += SAMPLE_STEP) {
-    var absVal = intensity[nzi];
-    if (absVal < 0) absVal = -absVal;
-    if (absVal > 0.001) {
-      sampleBuf[sampleCount++] = absVal;
-    }
-  }
-  var refIntensity = absMax;  // fallback
-  if (sampleCount > 10) {
-    // Partial sort: find the 85th percentile value using a selection
-    // approach — sort only the sampled subset
-    var samples = new Float32Array(sampleBuf.buffer, 0, sampleCount);
-    samples.sort();
-    refIntensity = samples[Math.floor(sampleCount * 0.85)] || absMax;
-  }
+  // ---- HISTOGRAM PERCENTILE (no sort) ----
+  // O(n) histogram binning instead of sampling + sorting.
+  var refIntensity = absMax;
+  if (absMax > 0.001) {
+    var TOPO_BINS = 512;
+    var topoBins = new Uint32Array(TOPO_BINS);
+    var topoScale = (TOPO_BINS - 1) / absMax;
+    var topoNonZero = 0;
 
-  // ----------------------------------------------------------------
-  // STEP 2: Gaussian blur — PING-PONG between two pooled buffers
-  // ----------------------------------------------------------------
-  // 4 passes of 3×3 Gaussian ≈ 9×9 kernel. No allocations.
-  // Reads from src, writes to dst, then swaps.
-  var blurA = _blurPool.bufA;
-  var blurB = _blurPool.bufB;
-
-  // Copy intensity into blurA as the starting point
-  blurA.set(intensity);
-
-  var src = blurA;
-  var dst = blurB;
-  for (var blurPass = 0; blurPass < 4; blurPass++) {
-    // Interior cells: apply 3×3 kernel
-    for (var y = 1; y < rows - 1; y++) {
-      var rowOff = y * cols;
-      var rowAbove = (y - 1) * cols;
-      var rowBelow = (y + 1) * cols;
-      for (var x = 1; x < cols - 1; x++) {
-        dst[rowOff + x] = (
-          src[rowAbove + x - 1]       + src[rowAbove + x] * 2 + src[rowAbove + x + 1] +
-          src[rowOff   + x - 1] * 2   + src[rowOff   + x] * 4 + src[rowOff   + x + 1] * 2 +
-          src[rowBelow + x - 1]       + src[rowBelow + x] * 2 + src[rowBelow + x + 1]
-        ) * 0.0625;  // 1/16
+    for (var nzi = 0; nzi < cellCount; nzi++) {
+      var nzVal = intensity[nzi];
+      if (nzVal > 0.001) {
+        topoBins[(nzVal * topoScale) | 0]++;
+        topoNonZero++;
       }
     }
-    // Edge rows/cols: copy from source (unchanged)
-    // First and last row
-    for (var ex = 0; ex < cols; ex++) {
-      dst[ex] = src[ex];
-      dst[(rows - 1) * cols + ex] = src[(rows - 1) * cols + ex];
-    }
-    // First and last column (interior rows only — corners already done)
-    for (var ey = 1; ey < rows - 1; ey++) {
-      dst[ey * cols] = src[ey * cols];
-      dst[ey * cols + cols - 1] = src[ey * cols + cols - 1];
-    }
 
-    // Swap for next pass
-    var tmp = src;
-    src = dst;
-    dst = tmp;
+    if (topoNonZero > 10) {
+      var topoTarget = Math.floor(topoNonZero * 0.85);
+      var topoCum = 0;
+      for (var tb = 0; tb < TOPO_BINS; tb++) {
+        topoCum += topoBins[tb];
+        if (topoCum >= topoTarget) {
+          refIntensity = (tb + 0.5) / topoScale;
+          break;
+        }
+      }
+    }
   }
-  // After 4 passes, src points to the final smoothed result.
-  // Copy out of the pool so it survives if computeTopology is called
-  // again this frame (projection.js calls it independently).
-  var smoothed = new Float32Array(src);
+
+  // ----------------------------------------------------------------
+  // STEP 2: Gaussian blur — GPU accelerated with CPU fallback
+  // ----------------------------------------------------------------
+  // 4 passes of 3×3 Gaussian ≈ 9×9 kernel.
+  // GPU path: <1ms at any resolution (texture ping-pong).
+  // CPU path: ~10-15ms at res=1 (tight loop, pooled buffers).
+  var smoothed;
+
+  if (typeof gpuBlurIntensity === "function") {
+    // GPU path — 4 blur passes as fullscreen shader draws
+    smoothed = gpuBlurIntensity(intensity, cols, rows, 4);
+  }
+
+  if (!smoothed) {
+    // CPU fallback — ping-pong between two pooled buffers
+    var blurA = _blurPool.bufA;
+    var blurB = _blurPool.bufB;
+
+    blurA.set(intensity);
+
+    var src = blurA;
+    var dst = blurB;
+    for (var blurPass = 0; blurPass < 4; blurPass++) {
+      // Interior cells: apply 3×3 kernel
+      for (var y = 1; y < rows - 1; y++) {
+        var rowOff = y * cols;
+        var rowAbove = (y - 1) * cols;
+        var rowBelow = (y + 1) * cols;
+        for (var x = 1; x < cols - 1; x++) {
+          dst[rowOff + x] = (
+            src[rowAbove + x - 1]       + src[rowAbove + x] * 2 + src[rowAbove + x + 1] +
+            src[rowOff   + x - 1] * 2   + src[rowOff   + x] * 4 + src[rowOff   + x + 1] * 2 +
+            src[rowBelow + x - 1]       + src[rowBelow + x] * 2 + src[rowBelow + x + 1]
+          ) * 0.0625;  // 1/16
+        }
+      }
+      // Edge rows/cols: copy from source (unchanged)
+      for (var ex = 0; ex < cols; ex++) {
+        dst[ex] = src[ex];
+        dst[(rows - 1) * cols + ex] = src[(rows - 1) * cols + ex];
+      }
+      for (var ey = 1; ey < rows - 1; ey++) {
+        dst[ey * cols] = src[ey * cols];
+        dst[ey * cols + cols - 1] = src[ey * cols + cols - 1];
+      }
+
+      var tmp = src;
+      src = dst;
+      dst = tmp;
+    }
+    // Copy out of pool so result survives multiple topology calls
+    smoothed = new Float32Array(src);
+  }
+
+  // ---- Blur the colorBias field for smooth directional forces ----
+  // Same approach: 4 passes of 3×3 Gaussian. Reuses the blur pool
+  // (safe because we already copied smoothed out above).
+  var smoothedBias;
+
+  if (typeof gpuBlurIntensity === "function") {
+    smoothedBias = gpuBlurIntensity(colorBias, cols, rows, 4);
+  }
+
+  if (!smoothedBias) {
+    var blurA2 = _blurPool.bufA;
+    var blurB2 = _blurPool.bufB;
+    blurA2.set(colorBias);
+
+    var src2 = blurA2;
+    var dst2 = blurB2;
+    for (var blurPass2 = 0; blurPass2 < 4; blurPass2++) {
+      for (var y2b = 1; y2b < rows - 1; y2b++) {
+        var rowOff2 = y2b * cols;
+        var rowAbove2 = (y2b - 1) * cols;
+        var rowBelow2 = (y2b + 1) * cols;
+        for (var x2b = 1; x2b < cols - 1; x2b++) {
+          dst2[rowOff2 + x2b] = (
+            src2[rowAbove2 + x2b - 1]       + src2[rowAbove2 + x2b] * 2 + src2[rowAbove2 + x2b + 1] +
+            src2[rowOff2   + x2b - 1] * 2   + src2[rowOff2   + x2b] * 4 + src2[rowOff2   + x2b + 1] * 2 +
+            src2[rowBelow2 + x2b - 1]       + src2[rowBelow2 + x2b] * 2 + src2[rowBelow2 + x2b + 1]
+          ) * 0.0625;
+        }
+      }
+      for (var ex2 = 0; ex2 < cols; ex2++) {
+        dst2[ex2] = src2[ex2];
+        dst2[(rows - 1) * cols + ex2] = src2[(rows - 1) * cols + ex2];
+      }
+      for (var ey2 = 1; ey2 < rows - 1; ey2++) {
+        dst2[ey2 * cols] = src2[ey2 * cols];
+        dst2[ey2 * cols + cols - 1] = src2[ey2 * cols + cols - 1];
+      }
+      var tmp2 = src2;
+      src2 = dst2;
+      dst2 = tmp2;
+    }
+    smoothedBias = new Float32Array(src2);
+  }
 
   // ----------------------------------------------------------------
   // STEP 3: Compute gradient vectors (central differences)
@@ -258,12 +328,12 @@ function computeTopology(grids, cols, rows, colorForce) {
   var ridges  = new Uint8Array(cellCount);
   var valleys = new Uint8Array(cellCount);
 
-  // With signed elevation:
-  //   Ridges = POSITIVE peaks (resistance zones)
-  //   Valleys = NEGATIVE troughs (support zones)
-  // Thresholds use refIntensity (85th percentile of absolute values).
-  var ridgeThresh  = refIntensity * 0.15;   // must be positive and significant
-  var valleyThresh = -refIntensity * 0.15;  // must be negative and significant
+  // With unsigned total-pressure elevation:
+  //   Ridges = peaks of total pressure (any color — high S/R zones)
+  //   Valleys = troughs of total pressure (low-pressure corridors)
+  // Thresholds use refIntensity (85th percentile of total pressure).
+  var ridgeThresh  = refIntensity * 0.15;   // significant pressure peak
+  var valleyThresh = refIntensity * 0.08;   // must have SOME signal nearby to be a valley
   var ridgeMargin = 0.05;
   var valleyMargin = 0.05;
 
@@ -273,8 +343,9 @@ function computeTopology(grids, cols, rows, colorForce) {
       var mag  = gradMag[idx2];
       var val2 = smoothed[idx2];
 
-      // ---- RIDGE DETECTION (positive peaks = resistance) ----
-      // Must be significantly positive AND higher than perpendicular neighbors.
+      // ---- RIDGE DETECTION (pressure peaks — barriers) ----
+      // Must have significant total pressure AND be a local maximum
+      // perpendicular to the gradient (non-maximum suppression).
       if (val2 > ridgeThresh && mag > 0.001) {
         var perpX = -gradY[idx2] / mag;
         var perpY =  gradX[idx2] / mag;
@@ -310,9 +381,12 @@ function computeTopology(grids, cols, rows, colorForce) {
         }
       }
 
-      // ---- VALLEY DETECTION (negative troughs = support) ----
-      // Must be significantly negative AND lower than perpendicular neighbors.
-      // This finds support zones where blue+red light dominates.
+      // ---- VALLEY DETECTION (low-pressure corridors) ----
+      // Valleys are local MINIMA of total pressure — gaps between
+      // pressure zones where particles can flow. Must be lower than
+      // perpendicular neighbors AND have some pressure nearby (not
+      // just empty space). The gradient must be non-trivial so we
+      // know which direction "perpendicular" means.
       if (val2 < valleyThresh && mag > 0.001) {
         var vperpX = -gradY[idx2] / mag;
         var vperpY =  gradX[idx2] / mag;
@@ -337,8 +411,9 @@ function computeTopology(grids, cols, rows, colorForce) {
 
           var vMarginAbs = refIntensity * valleyMargin;
 
-          // Valley: more negative than all perpendicular neighbors.
-          // This is a support trough — blue+red light concentrated here.
+          // Valley: lower than all perpendicular neighbors — a trough
+          // between pressure zones. Neighbors must be higher, confirming
+          // this is a corridor, not just empty space.
           if (val2 < vnVal1 - vMarginAbs && val2 < vnVal2 - vMarginAbs &&
               val2 < vnVal3 - vMarginAbs && val2 < vnVal4 - vMarginAbs) {
             valleys[idx2] = 1;
@@ -367,17 +442,17 @@ function computeTopology(grids, cols, rows, colorForce) {
   // a gateway and price could go either direction through the pass.
 
   var saddles = [];
-  // With signed elevation, saddle points are most interesting near
-  // the transition between resistance (positive) and support (negative).
-  // Use absolute value so we detect saddles in both regimes.
+  // With unsigned total-pressure elevation, saddle points occur
+  // where two pressure ridges form a pass between them — the classic
+  // breakout/decision point where price could go either direction.
   var saddleMinIntensity = refIntensity * 0.10;
 
   for (var gy3 = 2; gy3 < rows - 2; gy3++) {
     for (var gx3 = 2; gx3 < cols - 2; gx3++) {
       var idx3 = gy3 * cols + gx3;
       var val3 = smoothed[idx3];
-      // Must be at a location with significant terrain (either sign)
-      if (Math.abs(val3) < saddleMinIntensity) continue;
+      // Must be at a location with significant terrain
+      if (val3 < saddleMinIntensity) continue;
 
       // Second partial derivatives (central differences)
       var Hxx = smoothed[gy3 * cols + (gx3 + 1)]
@@ -400,8 +475,7 @@ function computeTopology(grids, cols, rows, colorForce) {
       if (det < -0.0001) {
         // Strength: how "deep" the saddle is — stronger negative det
         // means more pronounced pass between features.
-        // Use absolute intensity so support-zone saddles rank properly.
-        var strength = Math.abs(det) * Math.abs(val3);
+        var strength = Math.abs(det) * val3;
 
         saddles.push({
           gx: gx3,
@@ -463,8 +537,10 @@ function computeTopology(grids, cols, rows, colorForce) {
   // ----------------------------------------------------------------
   var topo = {
     // Raw data arrays (for advanced use / verification)
-    intensity:   smoothed,   // smoothed combined intensity
+    intensity:   smoothed,   // smoothed total pressure (unsigned)
     rawIntensity: intensity,  // unsmoothed (for comparison)
+    colorBias:   colorBias,  // signed directional force: +support / -resistance
+    maxBias:     maxBias,    // max absolute bias (for normalization)
     gradX:       gradX,
     gradY:       gradY,
     gradMag:     gradMag,
@@ -478,7 +554,7 @@ function computeTopology(grids, cols, rows, colorForce) {
     rows:        rows,
     maxIntensity: maxIntensity,
     minIntensity: minIntensity,
-    refIntensity: refIntensity,  // 85th percentile of absolute values
+    refIntensity: refIntensity,  // 85th percentile of total pressure
 
     // --- QUERY FUNCTIONS ---
     // These are what the prediction engine calls.
@@ -496,6 +572,18 @@ function computeTopology(grids, cols, rows, colorForce) {
         fy:   flowY[qi],
         conf: confinement[qi]
       };
+    },
+
+    // queryBias(gx, gy)
+    //   Returns the color bias at a grid cell: positive = support-dominated
+    //   (pushes price UP / particle Y decreases), negative = resistance-
+    //   dominated (pushes price DOWN / particle Y increases).
+    //   Normalized to roughly -1..+1 range using maxBias.
+    //   Returns 0 if out of bounds.
+    queryBias: function(gx, gy) {
+      if (gx < 0 || gx >= cols || gy < 0 || gy >= rows) return 0;
+      if (maxBias < 0.001) return 0;
+      return colorBias[gy * cols + gx] / maxBias;
     },
 
     // queryRidge(gx, gy, radius)
@@ -665,21 +753,23 @@ function queryFlowLive(grids, cols, rows, gx, gy, colorForce) {
 
   var gG = grids[0], gY = grids[1], gB = grids[2], gR = grids[3];
 
-  // Sample SIGNED intensity at the 4 cardinal neighbors + center.
-  // Resistance (green+yellow) = positive, support (blue+red) = negative.
+  // Sample UNSIGNED total pressure at the 4 cardinal neighbors + center.
+  // All light = pressure = high terrain, regardless of color.
+  // This matches the computeTopology paradigm: particles/prediction
+  // navigate through low-pressure corridors between pressure zones.
   var idxL = gy * cols + (gx - 1);
   var idxR = gy * cols + (gx + 1);
   var idxU = (gy - 1) * cols + gx;
   var idxD = (gy + 1) * cols + gx;
   var idxC = gy * cols + gx;
 
-  var vL = (gG[idxL]*wG + gY[idxL]*wY) - (gB[idxL]*wB + gR[idxL]*wR);
-  var vR = (gG[idxR]*wG + gY[idxR]*wY) - (gB[idxR]*wB + gR[idxR]*wR);
-  var vU = (gG[idxU]*wG + gY[idxU]*wY) - (gB[idxU]*wB + gR[idxU]*wR);
-  var vD = (gG[idxD]*wG + gY[idxD]*wY) - (gB[idxD]*wB + gR[idxD]*wR);
-  var vC = (gG[idxC]*wG + gY[idxC]*wY) - (gB[idxC]*wB + gR[idxC]*wR);
+  var vL = gG[idxL]*wG + gY[idxL]*wY + gB[idxL]*wB + gR[idxL]*wR;
+  var vR = gG[idxR]*wG + gY[idxR]*wY + gB[idxR]*wB + gR[idxR]*wR;
+  var vU = gG[idxU]*wG + gY[idxU]*wY + gB[idxU]*wB + gR[idxU]*wR;
+  var vD = gG[idxD]*wG + gY[idxD]*wY + gB[idxD]*wB + gR[idxD]*wR;
+  var vC = gG[idxC]*wG + gY[idxC]*wY + gB[idxC]*wB + gR[idxC]*wR;
 
-  // Gradient (central differences)
+  // Gradient (central differences) on total pressure
   var dx = (vR - vL) * 0.5;
   var dy = (vD - vU) * 0.5;
   var mag = Math.sqrt(dx * dx + dy * dy);
@@ -691,9 +781,8 @@ function queryFlowLive(grids, cols, rows, gx, gy, colorForce) {
   var fy = -dy / mag;
 
   // Confinement = how steep the terrain is around this cell.
-  // With signed field, use max absolute value for normalization.
-  var maxAbsI = Math.max(Math.abs(vL), Math.abs(vR), Math.abs(vU), Math.abs(vD), Math.abs(vC), 0.001);
-  var conf = mag / maxAbsI;
+  var maxI = Math.max(vL, vR, vU, vD, vC, 0.001);
+  var conf = mag / maxI;
 
   return { fx: fx, fy: fy, conf: conf };
 }
@@ -724,16 +813,16 @@ function queryRidgeLive(grids, cols, rows, gx, gy, colorForce, radius) {
 
   var gG = grids[0], gY = grids[1], gB = grids[2], gR = grids[3];
 
-  // Helper: SIGNED intensity at a grid cell.
-  // Positive = resistance (green+yellow), negative = support (blue+red).
-  // Ridges detected here are resistance peaks only, which is correct —
-  // the caller uses ridge proximity for repulsion (push away from resistance).
-  // Support attraction is handled by the flow direction (gradient toward
-  // negative values = toward support zones).
+  // Helper: UNSIGNED total pressure at a grid cell.
+  // All light = pressure, regardless of color. Ridges are peaks
+  // of total pressure — barriers that repel price from either side.
+  // Both support ridges and resistance ridges are now detected.
+  // The COLOR of the ridge (which direction it pushes) is handled
+  // separately by the color bias system.
   function intAt(x, y) {
     if (x < 0 || x >= cols || y < 0 || y >= rows) return 0;
     var i = y * cols + x;
-    return (gG[i]*wG + gY[i]*wY) - (gB[i]*wB + gR[i]*wR);
+    return gG[i]*wG + gY[i]*wY + gB[i]*wB + gR[i]*wR;
   }
 
   var bestDist = radius + 1;
@@ -1078,84 +1167,113 @@ function renderContours(ctx, topo, resolution, levels, options) {
 
   ctx.save();
 
-  // ---- GREYSCALE ELEVATION FILL ----
-  // Renders each grid cell as a filled rectangle whose brightness
-  // maps to the light intensity at that position. Bright zones
-  // (high S/R) appear white, dark zones (paths of least resistance)
-  // appear black/transparent. Drawn BEFORE contour lines so lines
-  // appear on top.
+  // ---- ELEVATION FILL (color-biased) ----
+  // Renders each grid cell as a filled pixel whose BRIGHTNESS maps
+  // to total pressure (light intensity), and whose HUE reflects the
+  // color bias — which type of pressure dominates:
+  //   Resistance-dominated (green+yellow > blue+red) = warm amber
+  //   Support-dominated (blue+red > green+yellow) = cool cyan
+  //   Balanced or no bias = neutral white/grey
+  //   No light = transparent (path of least resistance)
   //
-  // Uses alpha blending so the chart underneath remains visible.
-  // Maximum alpha is 0.45 to keep it subtle enough not to hide
-  // candles and beams.
+  // Uses ImageData bulk write instead of per-cell fillRect.
   if (showFill) {
-    // With signed elevation:
-    //   Positive (resistance) = warm tones (amber/white)
-    //   Negative (support)    = cool tones (blue/cyan)
-    //   Zero (open space)     = transparent
-    var posMax = topo.maxIntensity || maxI;
-    var negMax = Math.abs(topo.minIntensity || 0);
     var fillRef = topo.refIntensity || maxI;
+    var fillThreshold = fillRef * 0.02;
+    var biasData = topo.colorBias;
+    var fillMaxBias = topo.maxBias || 1;
+
+    // Pool the ImageData and tmp canvas across frames.
+    // Only reallocate when grid size changes.
+    if (!renderContours._fillCols || renderContours._fillCols !== cols
+        || renderContours._fillRows !== rows) {
+      renderContours._fillCanvas = document.createElement("canvas");
+      renderContours._fillCanvas.width = cols;
+      renderContours._fillCanvas.height = rows;
+      renderContours._fillCtx = renderContours._fillCanvas.getContext("2d");
+      renderContours._fillImg = new ImageData(cols, rows);
+      renderContours._fillCols = cols;
+      renderContours._fillRows = rows;
+    }
+
+    var fillPixels = renderContours._fillImg.data;
+
+    // Clear previous frame (bulk zero via Uint32 view)
+    var fillBuf32 = new Uint32Array(fillPixels.buffer);
+    for (var fz = 0; fz < fillBuf32.length; fz++) fillBuf32[fz] = 0;
 
     for (var fy = 0; fy < rows; fy++) {
       for (var fx = 0; fx < cols; fx++) {
-        var fVal = data[fy * cols + fx];
-        var fAbs = Math.abs(fVal);
-        if (fAbs < fillRef * 0.02) continue;  // skip near-zero (performance)
+        var fIdx = fy * cols + fx;
+        var fVal = data[fIdx];
+        if (fVal < fillThreshold) continue;  // unsigned, always >= 0
 
-        // Normalize by refIntensity so moderate features are visible
-        var fNorm = fAbs / fillRef;
+        var fNorm = fVal / fillRef;
         if (fNorm > 1) fNorm = 1;
-        var fAlpha = fNorm * 0.45;
+        // Alpha: 0..0.45 mapped to 0..115 byte range
+        var fAlphaByte = (fNorm * 115) | 0;
 
-        if (fVal > 0) {
-          // Resistance: warm amber/white
-          // Low intensity → dark amber, high → bright white
-          var rr = Math.floor(180 + fNorm * 75);   // 180..255
-          var rg = Math.floor(140 + fNorm * 95);   // 140..235
-          var rb = Math.floor(60 + fNorm * 60);     // 60..120
-          ctx.fillStyle = "rgba(" + rr + "," + rg + "," + rb + "," + fAlpha.toFixed(3) + ")";
+        var fPixOff = fIdx * 4;
+
+        // Color bias: -1..+1 where negative = resistance, positive = support
+        var fBias = biasData ? biasData[fIdx] / fillMaxBias : 0;
+        if (fBias > 1) fBias = 1;
+        if (fBias < -1) fBias = -1;
+
+        if (fBias < -0.1) {
+          // Resistance-dominated: warm amber
+          var rStr = -fBias;  // 0..1
+          fillPixels[fPixOff]     = (180 + fNorm * 75) | 0;
+          fillPixels[fPixOff + 1] = (140 + fNorm * 95 * rStr) | 0;
+          fillPixels[fPixOff + 2] = (60 + fNorm * 60 * (1 - rStr)) | 0;
+        } else if (fBias > 0.1) {
+          // Support-dominated: cool cyan
+          var sStr = fBias;  // 0..1
+          fillPixels[fPixOff]     = (40 + fNorm * 40) | 0;
+          fillPixels[fPixOff + 1] = (100 + fNorm * 120 * sStr) | 0;
+          fillPixels[fPixOff + 2] = (180 + fNorm * 75) | 0;
         } else {
-          // Support: cool blue/cyan
-          // Low intensity → dark blue, high → bright cyan
-          var sr = Math.floor(40 + fNorm * 40);     // 40..80
-          var sg = Math.floor(100 + fNorm * 120);   // 100..220
-          var sb = Math.floor(180 + fNorm * 75);    // 180..255
-          ctx.fillStyle = "rgba(" + sr + "," + sg + "," + sb + "," + fAlpha.toFixed(3) + ")";
+          // Balanced: neutral grey/white
+          var gv = (120 + fNorm * 135) | 0;
+          fillPixels[fPixOff]     = gv;
+          fillPixels[fPixOff + 1] = gv;
+          fillPixels[fPixOff + 2] = gv;
         }
-
-        ctx.fillRect(fx * resolution, fy * resolution, resolution, resolution);
+        fillPixels[fPixOff + 3] = fAlphaByte;
       }
     }
+
+    // One putImageData into the pooled small canvas, then scale up
+    renderContours._fillCtx.putImageData(renderContours._fillImg, 0, 0);
+    ctx.drawImage(renderContours._fillCanvas, 0, 0, cols, rows,
+                  0, 0, cols * resolution, rows * resolution);
   }
 
   // ---- CONTOUR LINES (marching squares) ----
-  // Draw iso-lines at evenly spaced intensity thresholds.
-  // Uses the classic lookup table for which edges of a 2×2 cell
-  // the contour crosses.
+  // Draw iso-lines at evenly spaced thresholds of total pressure.
+  // With unsigned elevation there's one set of contours (all positive).
+  // Color-biased: lines sample the local color bias to tint toward
+  // amber (resistance) or cyan (support), providing directional info.
 
   ctx.lineWidth = 1.5;
   ctx.globalAlpha = 0.6;
 
-  // With signed elevation, draw contour lines in both regimes:
-  //   Positive levels (resistance) = warm amber lines
-  //   Negative levels (support) = cool cyan lines
-  //   Zero crossing = white (the S/R boundary)
+  var biasForContour = topo.colorBias;
+  var biasMaxForContour = topo.maxBias || 1;
 
-  var negMax = Math.abs(topo.minIntensity || 0);
-  var posMax = topo.maxIntensity || maxI;
-
-  // --- Positive contours (resistance) ---
   for (var li = 1; li <= levels; li++) {
     var threshold = (li / (levels + 1)) * maxI;
-    var t = li / levels;  // 0..1 for color interpolation
+    var t = li / levels;  // 0..1 for brightness interpolation
 
-    // Warm amber: darker at low levels, brighter at high
-    var pR = Math.floor(180 + t * 75);
-    var pG = Math.floor(130 + t * 100);
-    var pB = Math.floor(50 + t * 50);
-    ctx.strokeStyle = "rgba(" + pR + "," + pG + "," + pB + ", 0.55)";
     ctx.beginPath();
+
+    // We'll batch segments by bias so we don't change strokeStyle
+    // per-cell. Use a neutral warm tone as the default and let the
+    // fill layer carry the color differentiation.
+    var pR = Math.floor(160 + t * 95);
+    var pG = Math.floor(140 + t * 80);
+    var pB = Math.floor(80 + t * 80);
+    ctx.strokeStyle = "rgba(" + pR + "," + pG + "," + pB + ", 0.55)";
 
     for (var cy = 0; cy < rows - 1; cy++) {
       for (var cx = 0; cx < cols - 1; cx++) {
@@ -1187,54 +1305,6 @@ function renderContours(ctx, topo, resolution, levels, options) {
       }
     }
     ctx.stroke();
-  }
-
-  // --- Negative contours (support) ---
-  if (negMax > 0.001) {
-    for (var li2 = 1; li2 <= levels; li2++) {
-      var threshold2 = -(li2 / (levels + 1)) * negMax;
-      var t2 = li2 / levels;
-
-      // Cool cyan: darker at shallow levels, brighter at deep
-      var sR = Math.floor(40 + t2 * 40);
-      var sG = Math.floor(120 + t2 * 100);
-      var sB = Math.floor(180 + t2 * 75);
-      ctx.strokeStyle = "rgba(" + sR + "," + sG + "," + sB + ", 0.55)";
-      ctx.beginPath();
-
-      for (var cy2 = 0; cy2 < rows - 1; cy2++) {
-        for (var cx2 = 0; cx2 < cols - 1; cx2++) {
-          // For negative thresholds, flip the comparison:
-          // we want cells BELOW the threshold (more negative)
-          var tl2 = data[cy2 * cols + cx2];
-          var tr2 = data[cy2 * cols + (cx2 + 1)];
-          var bl2 = data[(cy2 + 1) * cols + cx2];
-          var br2 = data[(cy2 + 1) * cols + (cx2 + 1)];
-
-          var caseIdx2 = 0;
-          if (tl2 <= threshold2) caseIdx2 |= 8;
-          if (tr2 <= threshold2) caseIdx2 |= 4;
-          if (br2 <= threshold2) caseIdx2 |= 2;
-          if (bl2 <= threshold2) caseIdx2 |= 1;
-          if (caseIdx2 === 0 || caseIdx2 === 15) continue;
-
-          var tEdge2 = Math.max(0, Math.min(1, (threshold2 - tl2) / (tr2 - tl2 + 0.0001)));
-          var bEdge2 = Math.max(0, Math.min(1, (threshold2 - bl2) / (br2 - bl2 + 0.0001)));
-          var lEdge2 = Math.max(0, Math.min(1, (threshold2 - tl2) / (bl2 - tl2 + 0.0001)));
-          var rEdge2 = Math.max(0, Math.min(1, (threshold2 - tr2) / (br2 - tr2 + 0.0001)));
-
-          var px2 = cx2 * resolution, py2 = cy2 * resolution;
-          var pxr2 = (cx2 + 1) * resolution, pyr2 = (cy2 + 1) * resolution;
-
-          drawContourSegments(ctx, caseIdx2,
-            px2 + tEdge2 * resolution, py2,
-            px2 + bEdge2 * resolution, pyr2,
-            px2, py2 + lEdge2 * resolution,
-            pxr2, py2 + rEdge2 * resolution);
-        }
-      }
-      ctx.stroke();
-    }
   }
 
   // ---- RIDGE OVERLAY ----

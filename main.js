@@ -410,24 +410,19 @@ function setAnimSpeed(val) {
 // Scrub to a specific candle position
 function scrubAnim(val) {
   state.animCandles = val;
-  heatmapCache     = {};
-  clearTopoCache();
-  sightLineCache   = {};
-  bgGridCache      = {};
-  bgSightLineCache = {};
-  particles        = {};
 
-  // Clear WebGL offscreen canvases
-  if (typeof glHeatmap !== "undefined" && glHeatmap.gl) {
-    glHeatmap.gl.clearColor(0, 0, 0, 0);
-    glHeatmap.gl.clear(glHeatmap.gl.COLOR_BUFFER_BIT);
-  }
-  if (typeof glBeams !== "undefined" && glBeams.gl && glBeams.fbo) {
-    glBeams.gl.bindFramebuffer(glBeams.gl.FRAMEBUFFER, glBeams.fbo);
-    glBeams.gl.clearColor(0, 0, 0, 0);
-    glBeams.gl.clear(glBeams.gl.COLOR_BUFFER_BIT);
-    glBeams.gl.bindFramebuffer(glBeams.gl.FRAMEBUFFER, null);
-  }
+  // Don't wipe heatmapCache or sightLineCache — their keys include
+  // animCandles, so scrubbing to a previously-visited frame finds
+  // cache hits. Only clear single-slot caches (topology, contour,
+  // projection) which need to recompute for the new position.
+  _topoCacheKey    = "";
+  _topoCacheResult = null;
+  _contourCacheKey = "";
+  _projCacheKey    = "";
+  _projCacheResult = null;
+  _projCacheDims   = null;
+
+  particles = {};
 
   updateProgress();
   cancelAnim();
@@ -446,11 +441,20 @@ function animTick() {
     updateToolbar();
   }
 
-  // Only clear heatmap cache (rebuilt each frame from sight-line data).
-  // Sight line cache is NOT cleared — each frame either hits a cached
-  // entry or builds one quickly via pre-computed visibility pairs.
+  // Wipe heatmap cache — at res=1, each frame is ~32MB of typed arrays.
+  // Accumulating them across ticks would consume hundreds of MB and
+  // cause GC pressure. The targeted eviction in buildHeatmap keeps
+  // the last 2 frames anyway.
   heatmapCache = {};
-  clearTopoCache();
+
+  // Clear single-slot caches for the new tick
+  _topoCacheKey    = "";
+  _topoCacheResult = null;
+  _contourCacheKey = "";
+  _projCacheKey    = "";
+  _projCacheResult = null;
+  _projCacheDims   = null;
+
   particles = {};
   updateProgress();
   cancelAnim();
@@ -627,6 +631,10 @@ function clearTopoCache() {
   _ptopoCacheResult = null;
   _dsSourceKey      = "";
   _dsGrids          = null;
+  _contourCacheKey  = "";  // invalidate cached contour rendering too
+  _projCacheKey     = "";  // invalidate cached projection
+  _projCacheResult  = null;
+  _projCacheDims    = null;
 }
 
 
@@ -636,9 +644,29 @@ function clearTopoCache() {
 // Called once for raycast/sightlines mode (static image) or
 // every frame for particle mode (animated).
 
+// Pooled V.Beams grid clones — reused every frame to avoid
+// allocating 32MB of typed arrays per frame at res=1.
+var _vbeamGridPool = [null, null, null, null];
+var _vbeamPoolSize = 0;
+
+// Cached contour rendering — renderContours does ~26M cell iterations
+// at res=1 (marching squares, ridge/valley scans). The topology doesn't
+// change between frames, so render once to an offscreen canvas and
+// drawImage it each frame.
+var _contourCanvas   = null;
+var _contourCtx      = null;
+var _contourCacheKey = "";
+
+// Cached projection output — buildProjection is 5400 lines and takes
+// ~120ms at res=1. In static view (no animation, no parameter changes),
+// nothing changes between frames. Cache the output and reuse it.
+var _projCacheKey    = "";
+var _projCacheResult = null;
+var _projCacheDims   = null;
+
 function drawFrame() {
   var _t0 = performance.now();
-  var _tSL = 0, _tHM = 0, _tProj = 0;
+  var _tSL = 0, _tHM = 0, _tProj = 0, _tR0 = 0, _tR1 = 0, _tR2 = 0;
   var dims = getChartDims();
   var screenW = dims.screenW || dims.width;
   var screenH = dims.screenH || dims.height;
@@ -755,7 +783,7 @@ function drawFrame() {
           candles, dims, state.heatmapRes, assetKey, slData, range
         );
 
-        // During animation, drop old frames to save memory
+        // During animation, keep last 2 frames, evict older.
         if (state.animating && state.animCandles > 5) {
           var oldKey = assetKey + "-" + state.heatmapRes + "-"
             + state.translucency.toFixed(2) + "-" + state.intensityMode + "-"
@@ -770,10 +798,17 @@ function drawFrame() {
         // don't pollute the cache. Only needed when projection
         // actually WRITES into the grids (paintBeam calls).
         var baseHm = heatmapCache[cacheKey];
-        var clonedGrids = [];
-        for (var cgi = 0; cgi < baseHm.grids.length; cgi++) {
-          clonedGrids.push(new Float32Array(baseHm.grids[cgi]));
+        var _cellCount = baseHm.cols * baseHm.rows;
+        if (_cellCount !== _vbeamPoolSize) {
+          for (var pi = 0; pi < 4; pi++) {
+            _vbeamGridPool[pi] = new Float32Array(_cellCount);
+          }
+          _vbeamPoolSize = _cellCount;
         }
+        for (var cgi = 0; cgi < 4; cgi++) {
+          _vbeamGridPool[cgi].set(baseHm.grids[cgi]);
+        }
+        var clonedGrids = _vbeamGridPool;
         hmData = {
           grids: clonedGrids,
           cols: baseHm.cols,
@@ -802,8 +837,33 @@ function drawFrame() {
       projDims = getProjectionDims(dims, candles.length);
       lastFrameState.projDims = projDims;
       if (projDims) {
-        projData = buildProjection(hmData, state.heatmapRes, candles, dims, projDims,
-                                   range.priceMin, range.priceMax, assetKey);
+        // Cache key: everything that affects projection output.
+        // cacheKey already includes asset, res, translucency, animCandles, etc.
+        // Add projection-specific state.
+        var projCacheKey = cacheKey + "|p"
+          + "|pt" + (state.predTopo ? "1" : "0")
+          + "|pl" + (state.predLight ? "1" : "0")
+          + "|pv" + (state.predVBeam ? "1" : "0")
+          + "|pd" + projDims.projLeft + "," + projDims.projWidth
+          + "|pr" + range.priceMin.toFixed(2) + "," + range.priceMax.toFixed(2);
+
+        if (projCacheKey === _projCacheKey && _projCacheResult) {
+          // Cache hit — reuse previous projection (0ms vs ~120ms)
+          projData = _projCacheResult;
+          projDims = _projCacheDims;
+        } else {
+          // Cache miss — compute projection
+          var projTopo = (state.predTopo && typeof getCachedTopology === "function")
+            ? getCachedTopology(hmData, state.colorForce, cacheKey)
+            : null;
+
+          projData = buildProjection(hmData, state.heatmapRes, candles, dims, projDims,
+                                     range.priceMin, range.priceMax, assetKey, projTopo);
+
+          _projCacheKey    = projCacheKey;
+          _projCacheResult = projData;
+          _projCacheDims   = projDims;
+        }
       }
     }
     var _tProj = performance.now();
@@ -811,6 +871,7 @@ function drawFrame() {
     // ---------------------------------------------------------------
     // STEP 4: Mode-specific visualization
     // ---------------------------------------------------------------
+    var _tR0 = performance.now();
 
     // --- RAYCAST MODE: render the heatmap ---
     // Rendered AFTER projection so virtual candle beams (painted into
@@ -821,6 +882,7 @@ function drawFrame() {
         state.multiAsset ? colors.heatHi : null
       );
     }
+    var _tR1 = performance.now();
 
     // --- PARTICLE MODE ---
     if (state.mode === "particle") {
@@ -991,26 +1053,52 @@ function drawFrame() {
     // optional flow arrows from the topological analysis. Available in
     // both raycast and particle modes (where the heatmap grids exist).
     //
-    // During animation, contours only extend as far as the light field
-    // reaches from the currently visible candles. They grow outward as
-    // more candles are revealed — this is correct behavior, not a bug.
-    //
-    // When projection is on, reuses the topology already computed inside
-    // buildProjection. When projection is off, computes it standalone
-    // from the heatmap grids so you can visualize the terrain independently.
+    // CACHED: renderContours has ~26M cell iterations at res=1 (marching
+    // squares + ridge/valley scans). The topology doesn't change between
+    // frames — only when the heatmap changes. So we render to an offscreen
+    // canvas once and drawImage it each frame (~0.1ms vs ~300ms).
+    var _tR2 = performance.now();
     if ((state.showContours || state.contourFill) && (state.mode === "raycast" || state.mode === "particle") && hmData) {
       var contourTopo = (projData && projData.topology)
         ? projData.topology
         : getCachedTopology(hmData, state.colorForce, cacheKey);
 
       if (contourTopo) {
-        renderContours(ctx, contourTopo, state.heatmapRes, 5, {
-          showRidges:  true,
-          showValleys: true,
-          showSaddles: true,
-          showFlow:    state.contourFlow,
-          showFill:    state.contourFill
-        });
+        // Build cache key from everything that affects contour rendering
+        var contourCacheKey = cacheKey + "|cr" + state.heatmapRes
+          + "|cc" + (state.showContours ? "1" : "0")
+          + "|cf" + (state.contourFill ? "1" : "0")
+          + "|cfl" + (state.contourFlow ? "1" : "0");
+
+        if (contourCacheKey !== _contourCacheKey) {
+          // Cache miss — render contours to offscreen canvas
+          var cw = contourTopo.cols * state.heatmapRes;
+          var ch = contourTopo.rows * state.heatmapRes;
+
+          if (!_contourCanvas || _contourCanvas.width !== cw || _contourCanvas.height !== ch) {
+            _contourCanvas = document.createElement("canvas");
+            _contourCanvas.width = cw;
+            _contourCanvas.height = ch;
+            _contourCtx = _contourCanvas.getContext("2d");
+          } else {
+            _contourCtx.clearRect(0, 0, cw, ch);
+          }
+
+          renderContours(_contourCtx, contourTopo, state.heatmapRes, 5, {
+            showRidges:  true,
+            showValleys: true,
+            showSaddles: true,
+            showFlow:    state.contourFlow,
+            showFill:    state.contourFill
+          });
+
+          _contourCacheKey = contourCacheKey;
+        }
+
+        // Draw cached contour canvas (~0.1ms vs ~300ms for full render)
+        if (_contourCanvas) {
+          ctx.drawImage(_contourCanvas, 0, 0);
+        }
       }
     }
 
@@ -1177,12 +1265,21 @@ function drawFrame() {
   // ---- Performance timing breakdown ----
   var _tEnd = performance.now();
   var _total = _tEnd - _t0;
-  if (_total > 500) {  // only log if frame took > 500ms
+  if (_total > 16) {  // log any frame over 16ms (60fps budget)
+    var slTime = (_tSL || _t0) - _t0;
+    var hmTime = (_tHM || _tSL || _t0) - (_tSL || _t0);
+    var projTime = (_tProj || _tHM || _t0) - (_tHM || _tSL || _t0);
+    var hmRender = (_tR1 || _tProj || _t0) - (_tR0 || _tProj || _t0);
+    var contourTime = (_tR2 && _tR1) ? (_tEnd - _tR2) : 0;
+    var otherRender = (_tEnd - (_tProj || _tHM || _t0)) - hmRender - contourTime;
     console.log("[drawFrame] TOTAL: " + _total.toFixed(0) + "ms"
-      + " | SL: " + ((_tSL || _t0) - _t0).toFixed(0)
-      + " | HM: " + ((_tHM || _tSL || _t0) - (_tSL || _t0)).toFixed(0)
-      + " | Proj: " + ((_tProj || _tHM || _t0) - (_tHM || _tSL || _t0)).toFixed(0)
-      + " | Render: " + (_tEnd - (_tProj || _tHM || _t0)).toFixed(0));
+      + " | SL:" + slTime.toFixed(0)
+      + " HM:" + hmTime.toFixed(0)
+      + " Proj:" + projTime.toFixed(0)
+      + " HMrender:" + hmRender.toFixed(0)
+      + " Contour:" + contourTime.toFixed(0)
+      + " Other:" + otherRender.toFixed(0)
+      + " | res=" + state.heatmapRes);
   }
 }
 
@@ -2224,11 +2321,228 @@ async function cgFetchCandlesLight(coinId, days, targetMs) {
 
 
 // ================================================================
-// COINGECKO MAIN FETCH
+// COINGECKO FETCH — PER-ASSET HELPERS
 // ================================================================
-// Mirrors fetchLive() but pulls from CoinGecko market_chart and
-// synthesizes candles at the exact intervals Binance would provide.
-// Multi-res stitching works the same way: fine→medium→coarse layers.
+// These extract the per-asset fetch logic so the main function can
+// fetch the primary asset first, display immediately, then fetch
+// remaining assets in the background without blocking the UI.
+
+// Track when each asset's data was last fetched, what range was used,
+// and whether a background fetch is already in progress.
+// Used by auto-refresh to know when data has gone stale.
+var _cgFetchState = {
+  timestamps: {},       // { SOL: Date.now(), ETH: ..., BTC: ... }
+  rawRange:   null,     // last-used range selector value
+  cgRange:    null,     // last-used CG_RANGE_MAP entry
+  isMultiRes: false,    // was last fetch multi-res?
+  bgFetching: false     // is a background fetch in progress?
+};
+
+
+// Fetch candle data (Phase 1) for a single asset.
+// Stores results directly into candleData[assetKey].
+// Returns true on success, false on failure.
+async function cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl) {
+  var coinId = CG_COIN_IDS[assetKey];
+  if (!coinId) return false;
+
+  if (isMultiRes) {
+    showLoading("Fetching " + assetKey + " (multi-res CG)…");
+
+    statusEl.textContent = "Fetching " + assetKey + " (4h layer)...";
+    var layer4h = await cgFetchCandles(coinId, 30, 4 * 60 * 60000);
+    await cgDelay();
+
+    statusEl.textContent = "Fetching " + assetKey + " (1h layer)...";
+    var layer1h = await cgFetchCandles(coinId, 7, 60 * 60000);
+    await cgDelay();
+
+    statusEl.textContent = "Fetching " + assetKey + " (15m layer)...";
+    var layerFine = await cgFetchCandles(coinId, 1, 15 * 60000);
+    await cgDelay();
+
+    if (layer4h && layer1h && layerFine) {
+      var cutoff1h   = layer1h[0].time;
+      var cutoffFine = layerFine[0].time;
+      var trimmed4h  = layer4h.filter(function(c) { return c.time < cutoff1h; });
+      var trimmed1h  = layer1h.filter(function(c) { return c.time < cutoffFine; });
+      candleData[assetKey] = trimmed4h.concat(trimmed1h).concat(layerFine);
+    } else {
+      candleData[assetKey] = layerFine || layer1h || layer4h;
+      if (!candleData[assetKey]) return false;
+    }
+  } else {
+    showLoading("Fetching " + assetKey + " from CoinGecko…");
+    statusEl.textContent = "Fetching " + assetKey + "...";
+
+    var candles = await cgFetchCandles(coinId, cgRange.days, cgRange.targetMs);
+    await cgDelay();
+
+    if (candles && candles.length > 0) {
+      candleData[assetKey] = candles;
+    } else {
+      return false;
+    }
+  }
+
+  // Gap-fill and stitch
+  if (candleData[assetKey] && candleData[assetKey].length > 1) {
+    candleData[assetKey] = fillCandleGaps(candleData[assetKey], 0);
+    stitchCandles(candleData[assetKey]);
+  }
+
+  _cgFetchState.timestamps[assetKey] = Date.now();
+  return true;
+}
+
+
+// Fetch background layers (Phase 2) for a single asset.
+// Stores results directly into backgroundData[assetKey].
+async function cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl) {
+  var coinId = CG_COIN_IDS[assetKey];
+  if (!coinId) return;
+
+  var viewTargetMs = isMultiRes ? 15 * 60000 : cgRange.targetMs;
+  var needBg1h    = (viewTargetMs <= 15 * 60000);
+  var needBg4h    = needBg1h || (viewTargetMs <= 60 * 60000);
+  var needBgDaily = needBg1h || needBg4h || (viewTargetMs <= 4 * 60 * 60000);
+  var needBgWeekly = (viewTargetMs >= 24 * 60 * 60000);
+
+  var visStart = (candleData[assetKey] && candleData[assetKey].length > 0)
+    ? candleData[assetKey][0].time : Infinity;
+
+  var bgWeekly = null, bgDaily = null, bgFourH = null, bgOneH = null;
+
+  if (needBgWeekly) {
+    statusEl.textContent = "Fetching " + assetKey + " weekly bg...";
+    bgWeekly = await cgFetchCandlesLight(coinId, 365, 7 * 24 * 60 * 60000);
+    await cgDelay();
+  }
+  if (needBgDaily) {
+    statusEl.textContent = "Fetching " + assetKey + " daily bg...";
+    showLoading("Fetching " + assetKey + " background…");
+    bgDaily = await cgFetchCandlesLight(coinId, 90, 24 * 60 * 60000);
+    await cgDelay();
+  }
+  if (needBg4h) {
+    statusEl.textContent = "Fetching " + assetKey + " 4h bg...";
+    bgFourH = await cgFetchCandlesLight(coinId, 30, 4 * 60 * 60000);
+    await cgDelay();
+  }
+  if (needBg1h) {
+    statusEl.textContent = "Fetching " + assetKey + " 1h bg...";
+    bgOneH = await cgFetchCandlesLight(coinId, 7, 60 * 60000);
+    await cgDelay();
+  }
+
+  // Stitch layers: coarsest first, trimming overlaps
+  var stitched = [];
+
+  if (bgWeekly && bgWeekly.length > 0) {
+    for (var wi = 0; wi < bgWeekly.length; wi++) {
+      if (bgWeekly[wi].time < visStart) stitched.push(bgWeekly[wi]);
+    }
+  }
+  if (bgDaily && bgDaily.length > 0) {
+    var dailyCut = Infinity;
+    if (bgFourH && bgFourH.length > 0)   dailyCut = bgFourH[0].time;
+    else if (bgOneH && bgOneH.length > 0) dailyCut = bgOneH[0].time;
+    dailyCut = Math.min(dailyCut, visStart);
+    var dailyFloor = stitched.length > 0 ? stitched[stitched.length - 1].time : -Infinity;
+    for (var di = 0; di < bgDaily.length; di++) {
+      if (bgDaily[di].time > dailyFloor && bgDaily[di].time < dailyCut) {
+        stitched.push(bgDaily[di]);
+      }
+    }
+  }
+  if (bgFourH && bgFourH.length > 0) {
+    var fourHCut = Infinity;
+    if (bgOneH && bgOneH.length > 0) fourHCut = bgOneH[0].time;
+    fourHCut = Math.min(fourHCut, visStart);
+    var fourHFloor = stitched.length > 0 ? stitched[stitched.length - 1].time : -Infinity;
+    for (var fi = 0; fi < bgFourH.length; fi++) {
+      if (bgFourH[fi].time > fourHFloor && bgFourH[fi].time < fourHCut) {
+        stitched.push(bgFourH[fi]);
+      }
+    }
+  }
+  if (bgOneH && bgOneH.length > 0) {
+    var oneHFloor = stitched.length > 0 ? stitched[stitched.length - 1].time : -Infinity;
+    for (var oi = 0; oi < bgOneH.length; oi++) {
+      if (bgOneH[oi].time > oneHFloor && bgOneH[oi].time < visStart) {
+        stitched.push(bgOneH[oi]);
+      }
+    }
+  }
+
+  backgroundData[assetKey] = stitched.length > 0 ? stitchCandles(fillCandleGaps(stitched, 0)) : null;
+}
+
+
+// Clear all rendering caches and trigger a fresh preprocess + draw.
+// Called after data changes (initial display and background updates).
+function cgClearAndRedraw(statusText, statusColor, callback) {
+  heatmapCache     = {};
+  clearTopoCache();
+  sightLineCache   = {};
+  bgSightLineCache = {};
+  bgGridCache      = {};
+  animPrecomputed  = {};
+  animPriceRange   = {};
+  particles        = {};
+  calibration      = {};
+  state.animCandles = 0;
+  resetZoom();
+  cancelAnim();
+  updateProgress();
+
+  setActive("btn-live", true);
+  setActive("btn-generated", false);
+
+  resizeCanvas();
+
+  var statusEl = document.getElementById("data-status");
+  preprocessChart(function() {
+    if (statusText && statusEl) {
+      statusEl.textContent = statusText;
+      statusEl.style.color = statusColor || "#00c080";
+    }
+    drawFrame();
+    if (callback) callback();
+  });
+}
+
+
+// Build the status text for the CoinGecko data display.
+function cgStatusText(assetKey, cgRange, isMultiRes) {
+  var bgCount = backgroundData[assetKey] ? backgroundData[assetKey].length : 0;
+  var viewTargetMs = isMultiRes ? 15 * 60000 : cgRange.targetMs;
+  var needBg1h    = (viewTargetMs <= 15 * 60000);
+  var needBg4h    = needBg1h || (viewTargetMs <= 60 * 60000);
+  var needBgDaily = needBg1h || needBg4h || (viewTargetMs <= 4 * 60 * 60000);
+  var needBgWeekly = (viewTargetMs >= 24 * 60 * 60000);
+
+  var bgLayers = [];
+  if (needBg1h)     bgLayers.push("1h");
+  if (needBg4h)     bgLayers.push("4h");
+  if (needBgDaily)  bgLayers.push("daily");
+  if (needBgWeekly) bgLayers.push("weekly");
+  var bgLabel = bgLayers.join("+") || "daily";
+
+  var label = isMultiRes ? "30d Multi-Res (15m→1h→4h)" : cgRange.label;
+  return "CoinGecko: " + CONFIG.CANDLE_COUNT
+    + " candles (" + label + ")"
+    + (bgCount > 0 ? " + " + bgCount + " bg " + bgLabel : "");
+}
+
+
+// ================================================================
+// COINGECKO MAIN FETCH (refactored)
+// ================================================================
+// Fetches the PRIMARY asset first (state.asset), displays it
+// immediately, then fetches remaining assets in the background.
+// When viewing a single token without overlay, you see your chart
+// in ~3-6 API calls instead of waiting for all 9-18.
 
 async function fetchLiveCoinGecko() {
   stopLiveTicker();
@@ -2252,227 +2566,188 @@ async function fetchLiveCoinGecko() {
   statusEl.style.color = "#5af";
   showLoading("Fetching CoinGecko data…");
 
-  var success = true;
-  var assets = ["SOL", "ETH", "BTC"];
   var isMultiRes = (rawRange === "multi");
 
+  // Store fetch params for auto-refresh
+  _cgFetchState.rawRange   = rawRange;
+  _cgFetchState.cgRange    = cgRange;
+  _cgFetchState.isMultiRes = isMultiRes;
+
   // ================================================================
-  // Phase 1: FETCH CANDLE DATA
+  // PRIMARY ASSET: fetch and display immediately
   // ================================================================
+  var primaryAsset = state.asset;  // e.g. "SOL"
+  var primaryOk = await cgFetchOneAssetCandles(primaryAsset, cgRange, isMultiRes, statusEl);
 
-  for (var i = 0; i < assets.length; i++) {
-    var assetKey = assets[i];
-    var coinId   = CG_COIN_IDS[assetKey];
-
-    if (isMultiRes) {
-      // ---- MULTI-RES: 3 layers from market_chart ----
-      // days=30 → hourly points → synthesize 4h candles (coarse)
-      // days=7  → hourly points → synthesize 1h candles (mid)
-      // days=1  → ~5min points  → synthesize 15m candles (fine)
-      showLoading("Fetching " + assetKey + " (multi-res CG)…");
-
-      statusEl.textContent = "Fetching " + assetKey + " (4h layer)...";
-      var layer4h = await cgFetchCandles(coinId, 30, 4 * 60 * 60000);
-      await cgDelay();
-
-      statusEl.textContent = "Fetching " + assetKey + " (1h layer)...";
-      var layer1h = await cgFetchCandles(coinId, 7, 60 * 60000);
-      await cgDelay();
-
-      statusEl.textContent = "Fetching " + assetKey + " (15m layer)...";
-      var layerFine = await cgFetchCandles(coinId, 1, 15 * 60000);
-      await cgDelay();
-
-      // Stitch: same logic as Binance multi-res
-      if (layer4h && layer1h && layerFine) {
-        var cutoff1h   = layer1h[0].time;
-        var cutoffFine = layerFine[0].time;
-        var trimmed4h  = layer4h.filter(function(c) { return c.time < cutoff1h; });
-        var trimmed1h  = layer1h.filter(function(c) { return c.time < cutoffFine; });
-        candleData[assetKey] = trimmed4h.concat(trimmed1h).concat(layerFine);
-      } else {
-        candleData[assetKey] = layerFine || layer1h || layer4h;
-        if (!candleData[assetKey]) success = false;
-      }
-
-    } else {
-      // ---- SINGLE RESOLUTION ----
-      showLoading("Fetching " + assetKey + " from CoinGecko…");
-      statusEl.textContent = "Fetching " + assetKey + "...";
-
-      var candles = await cgFetchCandles(coinId, cgRange.days, cgRange.targetMs);
-      await cgDelay();
-
-      if (candles && candles.length > 0) {
-        candleData[assetKey] = candles;
-      } else {
-        statusEl.textContent = "No CoinGecko data for " + assetKey;
-        statusEl.style.color = "#ff6040";
-        success = false;
-      }
-    }
-  }
-
-  // ---- Gap-fill: ensure no time discontinuities ----
-  // CoinGecko data and multi-res stitching can create gaps.
-  // Same treatment as Binance: pass 0 for auto-detect mode.
-  for (var gi = 0; gi < assets.length; gi++) {
-    if (candleData[assets[gi]] && candleData[assets[gi]].length > 1) {
-      candleData[assets[gi]] = fillCandleGaps(candleData[assets[gi]], 0);
-      stitchCandles(candleData[assets[gi]]);
-    }
-  }
-
-  // Bail if we got nothing
-  if (!candleData.SOL || candleData.SOL.length === 0) {
-    statusEl.textContent = "No data — check API key and try again";
+  if (!primaryOk || !candleData[primaryAsset] || candleData[primaryAsset].length === 0) {
+    statusEl.textContent = "No data for " + primaryAsset + " — check API key";
     statusEl.style.color = "#ff6040";
     hideLoading();
     return;
   }
 
-  CONFIG.CANDLE_COUNT = candleData.SOL.length;
+  CONFIG.CANDLE_COUNT = candleData[primaryAsset].length;
 
-  // ================================================================
-  // Phase 2: BACKGROUND DATA
-  // ================================================================
-  // Same layered approach as Binance: fetch coarser timeframes for
-  // off-screen S/R context. CoinGecko gives hourly for 2-90 days,
-  // so we synthesize the background layer from that.
+  // Fetch background data for primary asset
+  await cgFetchOneAssetBg(primaryAsset, cgRange, isMultiRes, statusEl);
 
-  // CoinGecko /market_chart provides:
-  //   days=7  → hourly points → can synthesize 1h bg candles
-  //   days=30 → hourly points → can synthesize 4h bg candles
-  //   days=90 → daily points  → can synthesize daily bg candles
-  //   days=365 → daily points → can synthesize weekly bg candles
-  var viewTargetMs = isMultiRes ? 15 * 60000 : cgRange.targetMs;
-  var needBg1h    = (viewTargetMs <= 15 * 60000);
-  var needBg4h    = needBg1h || (viewTargetMs <= 60 * 60000);
-  var needBgDaily = needBg1h || needBg4h || (viewTargetMs <= 4 * 60 * 60000);
-  var needBgWeekly = (viewTargetMs >= 24 * 60 * 60000);
+  // ---- DISPLAY IMMEDIATELY ----
+  // The primary asset has candles + background. Clear caches and draw
+  // so the user sees their chart right away. Remaining assets will
+  // be fetched in the background and silently merged in.
+  var primaryStatus = cgStatusText(primaryAsset, cgRange, isMultiRes);
+  cgClearAndRedraw(primaryStatus, "#00c080", function() {
+    // After initial display, kick off background fetches for other assets
+    cgFetchRemainingAssets(primaryAsset, cgRange, isMultiRes);
+  });
+}
 
-  var bgLayers = [];
-  if (needBg1h)     bgLayers.push("1h");
-  if (needBg4h)     bgLayers.push("4h");
-  if (needBgDaily)  bgLayers.push("daily");
-  if (needBgWeekly) bgLayers.push("weekly");
-  var bgLabel = bgLayers.join("+") || "daily";
 
-  for (var j = 0; j < assets.length; j++) {
-    var bgKey  = assets[j];
-    var bgCoin = CG_COIN_IDS[bgKey];
-    var visStart = (candleData[bgKey] && candleData[bgKey].length > 0)
-      ? candleData[bgKey][0].time : Infinity;
+// ================================================================
+// BACKGROUND FETCH for remaining assets
+// ================================================================
+// Runs after the primary asset is displayed. Fetches the other two
+// assets' candles + background data, then silently updates caches.
+// Does NOT block the UI or trigger a full redraw unless overlay mode
+// is active.
 
-    // Fetch all needed layers first, then stitch with proper cutoffs.
-    var bgWeekly = null, bgDaily = null, bgFourH = null, bgOneH = null;
+async function cgFetchRemainingAssets(primaryAsset, cgRange, isMultiRes) {
+  if (_cgFetchState.bgFetching) return;  // already in progress
+  _cgFetchState.bgFetching = true;
 
-    if (needBgWeekly) {
-      statusEl.textContent = "Fetching " + bgKey + " weekly bg...";
-      bgWeekly = await cgFetchCandlesLight(bgCoin, 365, 7 * 24 * 60 * 60000);
-      await cgDelay();
+  var statusEl = document.getElementById("data-status");
+  var allAssets = ["SOL", "ETH", "BTC"];
+  var remaining = allAssets.filter(function(a) { return a !== primaryAsset; });
+
+  for (var i = 0; i < remaining.length; i++) {
+    var assetKey = remaining[i];
+    var ok = await cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl);
+    if (!ok) {
+      console.warn("[CG] Background fetch failed for " + assetKey);
+      continue;
     }
-    if (needBgDaily) {
-      statusEl.textContent = "Fetching " + bgKey + " daily bg...";
-      showLoading("Fetching " + bgKey + " background…");
-      bgDaily = await cgFetchCandlesLight(bgCoin, 90, 24 * 60 * 60000);
-      await cgDelay();
-    }
-    if (needBg4h) {
-      statusEl.textContent = "Fetching " + bgKey + " 4h bg...";
-      bgFourH = await cgFetchCandlesLight(bgCoin, 30, 4 * 60 * 60000);
-      await cgDelay();
-    }
-    if (needBg1h) {
-      statusEl.textContent = "Fetching " + bgKey + " 1h bg...";
-      bgOneH = await cgFetchCandlesLight(bgCoin, 7, 60 * 60000);
-      await cgDelay();
-    }
-
-    // ---- Stitch layers: coarsest first, trimming overlaps ----
-    var stitched = [];
-
-    // Weekly (coarsest)
-    if (bgWeekly && bgWeekly.length > 0) {
-      for (var wi = 0; wi < bgWeekly.length; wi++) {
-        if (bgWeekly[wi].time < visStart) stitched.push(bgWeekly[wi]);
-      }
-    }
-
-    // Daily — cut at where 4h starts (or 1h, or visStart)
-    if (bgDaily && bgDaily.length > 0) {
-      var dailyCut = Infinity;
-      if (bgFourH && bgFourH.length > 0)   dailyCut = bgFourH[0].time;
-      else if (bgOneH && bgOneH.length > 0) dailyCut = bgOneH[0].time;
-      dailyCut = Math.min(dailyCut, visStart);
-      var dailyFloor = stitched.length > 0 ? stitched[stitched.length - 1].time : -Infinity;
-      for (var di = 0; di < bgDaily.length; di++) {
-        if (bgDaily[di].time > dailyFloor && bgDaily[di].time < dailyCut) {
-          stitched.push(bgDaily[di]);
-        }
-      }
-    }
-
-    // 4h — cut at where 1h starts (or visStart)
-    if (bgFourH && bgFourH.length > 0) {
-      var fourHCut = Infinity;
-      if (bgOneH && bgOneH.length > 0) fourHCut = bgOneH[0].time;
-      fourHCut = Math.min(fourHCut, visStart);
-      var fourHFloor = stitched.length > 0 ? stitched[stitched.length - 1].time : -Infinity;
-      for (var fi = 0; fi < bgFourH.length; fi++) {
-        if (bgFourH[fi].time > fourHFloor && bgFourH[fi].time < fourHCut) {
-          stitched.push(bgFourH[fi]);
-        }
-      }
-    }
-
-    // 1h (finest background layer) — runs up to visStart
-    if (bgOneH && bgOneH.length > 0) {
-      var oneHFloor = stitched.length > 0 ? stitched[stitched.length - 1].time : -Infinity;
-      for (var oi = 0; oi < bgOneH.length; oi++) {
-        if (bgOneH[oi].time > oneHFloor && bgOneH[oi].time < visStart) {
-          stitched.push(bgOneH[oi]);
-        }
-      }
-    }
-
-    backgroundData[bgKey] = stitched.length > 0 ? stitchCandles(fillCandleGaps(stitched, 0)) : null;
+    await cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl);
   }
 
-  // ================================================================
-  // Phase 3: CLEAR CACHES AND REDRAW
-  // ================================================================
+  _cgFetchState.bgFetching = false;
 
-  heatmapCache     = {};
-  clearTopoCache();
-  sightLineCache   = {};
-  bgSightLineCache = {};
-  bgGridCache      = {};
-  animPrecomputed  = {};
-  animPriceRange   = {};
-  particles        = {};
-  calibration      = {};
-  state.animCandles = 0;
-  resetZoom();
-  cancelAnim();
-  updateProgress();
+  // Restore status to show all data is loaded
+  var primaryStatus = cgStatusText(primaryAsset, cgRange, isMultiRes);
+  if (statusEl) {
+    statusEl.textContent = primaryStatus + " (all assets ready)";
+    statusEl.style.color = "#00c080";
+  }
 
-  setActive("btn-live", true);
-  setActive("btn-generated", false);
-
-  resizeCanvas();
-
-  preprocessChart(function() {
-    if (success) {
-      var bgCount = backgroundData.SOL ? backgroundData.SOL.length : 0;
-      var label = isMultiRes ? "30d Multi-Res (15m→1h→4h)" : cgRange.label;
-      statusEl.textContent = "CoinGecko: " + CONFIG.CANDLE_COUNT
-        + " candles (" + label + ")"
-        + (bgCount > 0 ? " + " + bgCount + " bg " + bgLabel : "");
-      statusEl.style.color = "#00c080";
+  // If overlay mode is on, we need to re-preprocess to include the
+  // newly-fetched assets. Otherwise just quietly note they're ready.
+  if (state.multiAsset) {
+    // Silently precompute the newly-loaded assets without a full cache clear
+    var assets = ["BTC", "ETH", "SOL"];
+    for (var ai = 0; ai < assets.length; ai++) {
+      var ak = assets[ai];
+      if (!candleData[ak] || candleData[ak].length === 0) continue;
+      if (!animPrecomputed[ak] || animPrecomputed[ak].candles !== candleData[ak]) {
+        animPrecomputed[ak] = {
+          pairs:   precomputeVisibilityPairs(candleData[ak]),
+          candles: candleData[ak],
+        };
+      }
     }
-    drawFrame();
-  });
+    // Clear caches that depend on asset data and redraw
+    heatmapCache     = {};
+    clearTopoCache();
+    sightLineCache   = {};
+    bgSightLineCache = {};
+    bgGridCache      = {};
+    if (!state.animating) drawFrame();
+  }
+
+  hideLoading();
+}
+
+
+// ================================================================
+// AUTO-REFRESH: refetch stale data when live price is active
+// ================================================================
+// Called from tickerPoll(). Checks if the primary asset's candle
+// data has aged past one interval duration. If so, quietly re-fetches
+// that asset's data in the background. The other assets are also
+// checked and refreshed if stale.
+//
+// This means that if you leave Spectrum running with live price on,
+// the candle history automatically stays current without manual
+// re-fetching.
+
+var _cgAutoRefreshLock = false;  // prevent overlapping refreshes
+
+async function cgAutoRefreshCheck() {
+  // Only auto-refresh for CoinGecko source with live ticker active
+  if (!liveTicker.active || liveTicker.source !== "coingecko") return;
+  if (_cgAutoRefreshLock || _cgFetchState.bgFetching) return;
+  if (!_cgFetchState.cgRange || !_cgFetchState.rawRange) return;
+
+  var cgRange    = _cgFetchState.cgRange;
+  var isMultiRes = _cgFetchState.isMultiRes;
+
+  // Determine the candle interval in ms. For multi-res, use the finest
+  // layer (15m). This is how often new candles appear.
+  var intervalMs = isMultiRes ? 15 * 60000 : (cgRange.targetMs || 5 * 60000);
+
+  // Check all assets for staleness. Stale = last fetch was more than
+  // one interval ago. Only refresh one asset per poll cycle to stay
+  // within the API rate limit.
+  var allAssets = ["SOL", "ETH", "BTC"];
+  var now = Date.now();
+
+  for (var i = 0; i < allAssets.length; i++) {
+    var assetKey = allAssets[i];
+    var lastFetch = _cgFetchState.timestamps[assetKey] || 0;
+
+    if (now - lastFetch > intervalMs) {
+      // This asset's data is stale — refresh it
+      _cgAutoRefreshLock = true;
+      var statusEl = document.getElementById("data-status");
+
+      console.log("[CG] Auto-refreshing " + assetKey + " (stale by "
+        + Math.round((now - lastFetch) / 1000) + "s)");
+
+      var ok = await cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl);
+      if (ok) {
+        // Update CANDLE_COUNT if this is the primary asset
+        if (assetKey === state.asset) {
+          CONFIG.CANDLE_COUNT = candleData[assetKey].length;
+        }
+
+        // Refresh background data too
+        await cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl);
+
+        // Re-precompute visibility pairs for the refreshed asset
+        if (candleData[assetKey] && candleData[assetKey].length > 0) {
+          animPrecomputed[assetKey] = {
+            pairs:   precomputeVisibilityPairs(candleData[assetKey]),
+            candles: candleData[assetKey],
+          };
+        }
+
+        // Clear rendering caches so next drawFrame uses fresh data
+        heatmapCache     = {};
+        clearTopoCache();
+        sightLineCache   = {};
+        bgSightLineCache = {};
+        bgGridCache      = {};
+
+        // Restore status
+        if (statusEl) {
+          var st = cgStatusText(state.asset, cgRange, isMultiRes);
+          statusEl.textContent = st + " | LIVE";
+          statusEl.style.color = "#00c080";
+        }
+      }
+
+      _cgAutoRefreshLock = false;
+      break;  // only one asset per poll cycle — rate limit
+    }
+  }
 }
 
 
@@ -2768,6 +3043,13 @@ async function tickerPoll() {
   if (changed && !state.animating) {
     drawFrame();
   }
+
+  // Check if any asset's cached candle data has expired and needs
+  // a full re-fetch. This runs at most once per poll cycle and only
+  // refreshes one asset at a time to stay within API rate limits.
+  if (typeof cgAutoRefreshCheck === "function") {
+    cgAutoRefreshCheck();
+  }
 }
 
 
@@ -2895,10 +3177,22 @@ function init() {
   var glOk = initGLHeatmap();
   console.log("Heatmap renderer: " + (glOk ? "WebGL (GPU)" : "ImageData (CPU fallback)"));
 
-  // Initialize GPU beam accumulation (Phase 2).
-  // Falls back to CPU paintBeam loops (Phase 1 caching) if unavailable.
-  var glBOk = (typeof initGLBeams === "function") ? initGLBeams() : false;
-  console.log("Beam renderer: " + (glBOk ? "GPU instanced (Phase 2)" : "CPU (Phase 1 caching)"));
+  // Initialize unified GPU pipeline (replaces gl-beams + webgl-heatmap
+  // with single-context rendering: CPU beam segmentation + trivial
+  // fragment shader + direct FBO display). Falls back to old paths.
+  var glPipeOk = (typeof initGLPipeline === "function") ? initGLPipeline() : false;
+  if (!glPipeOk) {
+    // Fall back to old separate beam renderer if pipeline unavailable
+    var glBOk = (typeof initGLBeams === "function") ? initGLBeams() : false;
+    console.log("Beam renderer: " + (glBOk ? "GPU instanced (Phase 2)" : "CPU (Phase 1 caching)"));
+  } else {
+    console.log("Beam renderer: GPU pipeline (segmented, unified context)");
+
+    // GPU blur for topology acceleration (uses same WebGL2 context)
+    if (typeof initGPUBlur === "function") {
+      initGPUBlur();
+    }
+  }
 
   // Initialize WebGL2 instanced particle renderer (CPU fallback for
   // when the GPU compute particle system isn't available).

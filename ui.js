@@ -222,6 +222,19 @@ function setVBeamStr(pct) {
   drawFrame();
 }
 
+// Set Color Bias Force from slider (0..100 -> 0..1).
+// Controls how strongly the S/R color polarity pushes particles
+// and corridor paths vertically. 0% = terrain only (no color
+// influence). 100% = maximum directional push from light color.
+function setColorBiasForce(pct) {
+  state.colorBiasForce = pct / 100;
+  var valEl = document.getElementById("color-bias-val");
+  if (valEl) valEl.textContent = pct + "%";
+  heatmapCache = {};
+  cancelAnim();
+  drawFrame();
+}
+
 // Toggle the contour overlay (visual verification of topology).
 // Does NOT affect prediction — purely a rendering overlay.
 function toggleContours() {
@@ -421,10 +434,10 @@ function updateLegend() {
   var html = "";
 
   if (state.mode === "raycast") {
-    html += '<span style="color:#1edc5a">■ Green = high, up (strong resistance)</span>';
-    html += '<span style="color:#f0c828">■ Yellow = high, down (weak resistance)</span>';
-    html += '<span style="color:#288cff">■ Blue = low, up (weak support)</span>';
-    html += '<span style="color:#f03232">■ Red = low, down (strong support)</span>';
+    html += '<span style="color:#1edc5a">■ Green = from highs (strong resistance)</span>';
+    html += '<span style="color:#f0c828">■ Yellow = from highs (weak resistance)</span>';
+    html += '<span style="color:#288cff">■ Blue = from lows (weak support)</span>';
+    html += '<span style="color:#f03232">■ Red = from lows (strong support)</span>';
     if (state.raysOnly) {
       html += "<span>⤳ RAYS ONLY: base connections hidden</span>";
     }
@@ -515,6 +528,12 @@ function syncUIToState() {
   if (vbSlider) vbSlider.value = Math.round(state.predVBeamStr * 100);
   var vbVal = document.getElementById("vbeam-str-val");
   if (vbVal) vbVal.textContent = Math.round(state.predVBeamStr * 100) + "%";
+
+  // Color Bias Force slider (state 0..1, slider 0..100)
+  var cbSlider = document.getElementById("color-bias-slider");
+  if (cbSlider) cbSlider.value = Math.round(state.colorBiasForce * 100);
+  var cbVal = document.getElementById("color-bias-val");
+  if (cbVal) cbVal.textContent = Math.round(state.colorBiasForce * 100) + "%";
 
   // Let updateToolbar() handle all button active states
   updateToolbar();

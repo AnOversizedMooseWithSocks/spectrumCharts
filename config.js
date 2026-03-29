@@ -76,7 +76,7 @@ var state = {
   mode:          "raycast",
   asset:         "SOL",
   multiAsset:    false,
-  heatmapRes:    10,
+  heatmapRes:    4,
   showCandles:   true,
   translucency:  0.95,          // 95% opacity
   beamLenBoost:  0.0,           // 0% length→glow (corridor-focused, no beam glow)
@@ -122,6 +122,7 @@ var state = {
   predVBeamStr: 0.5,  // VBeam intensity multiplier (0..1, slider-controlled)
   predTopo:  true,    // topological flow field forces (ridges, valleys, gradient)
   predCorridor: true, // slime mold corridor pathfinding (lookahead through topology)
+  colorBiasForce: 0.25, // how strongly color bias (S/R polarity) pushes particles/corridors vertically
   predDistFade: false, // distance fade (OFF)
   predIntRev: true,   // intensity reversal: dampens/flips signal when beam brightness is unrealistic
   predMinStep: true,  // minimum step: ensures candles always move at least 30% of avg body
@@ -129,7 +130,7 @@ var state = {
   // -- Topology overlay (visual verification, does NOT affect prediction) --
   showContours: false, // draw contour lines + ridge/valley/saddle markers
   contourFlow:  false, // draw sparse flow-direction arrows (noisy, off by default)
-  contourFill:  true,  // draw greyscale elevation fill behind contour lines
+  contourFill:  false,  // draw greyscale elevation fill behind contour lines
   showCorridors: true,  // draw corridor pathfinding overlay (green dashed lines)
   showAttractorDebug: false, // draw particle attractor zones for visual verification
 

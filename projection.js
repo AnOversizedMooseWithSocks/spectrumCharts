@@ -43,7 +43,7 @@
  * ================================================================
  */
 
-function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, priceMax, assetKey) {
+function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, priceMax, assetKey, cachedTopo) {
   var chartTop  = dims.chartTop;
   var chartH    = dims.chartHeight;
   var count     = candles.length;
@@ -257,7 +257,10 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
   var topo = null;
   var topoForceWeights = null;   // verified accuracy weights from past runs
   if (state.predTopo && typeof computeTopology === "function") {
-    topo = computeTopology(hmGrids, hmCols, hmRows, state.colorForce);
+    // Use pre-computed topology when available (avoids recomputing
+    // blur + gradient + ridge detection every frame — ~20-30ms at res=1).
+    // The topology is from the CURRENT grid state before virtual beams.
+    topo = cachedTopo || computeTopology(hmGrids, hmCols, hmRows, state.colorForce);
     topoForceWeights = (typeof getTopoForceWeights === "function")
       ? getTopoForceWeights()
       : { flow: 0.5, valley: 0.5, ridge: 0.5, saddle: 0.5, overall: 0.5, totalSamples: 0 };
@@ -299,12 +302,14 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
   var cfRed    = cf.red.dir    * cf.red.str;
 
   // ================================================================
-  // sampleForce  —  GRAVITATIONAL LIGHT MODEL
+  // sampleForce  —  GRAVITATIONAL LIGHT MODEL + COLOR BIAS
   // ================================================================
   //
-  // Bright zones are like planets. Price is a satellite.
+  // TWO FORCES combined:
   //
-  // TWO REGIMES — just like real gravity + surface contact:
+  // 1. GRAVITY (position-dependent): Bright zones are like planets.
+  //    Price is attracted from afar, repelled at close range.
+  //    Based on TOTAL light intensity — color-blind.
   //
   //   FAR FIELD (distance > crossover):
   //     ATTRACTION. Price drifts TOWARD bright zones. A convergence
@@ -317,19 +322,17 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
   //     The denser the convergence, the harder the bounce. This is
   //     the "wall" effect — support holds, resistance rejects.
   //
-  // The crossover distance scales with brightness:
-  //   Dim zone:  small repulsion radius, weak pull
-  //   Bright zone: large repulsion radius, strong pull from far away
+  // 2. COLOR BIAS (position-independent): Each cell's S/R color
+  //    composition creates a directional push.
+  //    Support-dominated (blue+red > green+yellow) → pushes UP.
+  //    Resistance-dominated (green+yellow > blue+red) → pushes DOWN.
+  //    This is the light field telling price which way the pressure
+  //    goes, separate from the gravitational attract/repel.
   //
-  // Net effect: the particle orbits between bright zones, pulled
-  // toward them from afar but bouncing between them up close.
-  // It finds equilibrium in the channels — exactly like price
-  // oscillating between support and resistance.
-  //
-  // This matches what you see on the chart: very bright lights
-  // become a target, price moves toward them, then bounces once
-  // it gets close enough. The brightness threshold where attraction
-  // flips to repulsion IS the S/R interaction.
+  //    Controlled by state.colorBiasForce (the S/R Bias slider).
+
+  // Color bias strength — read once, used per cell in the scan loop
+  var cbForce = (state.colorBiasForce != null) ? state.colorBiasForce : 0.25;
 
   function sampleForce(gx, gy) {
     if (gx < 0 || gx >= hmCols) return 0;
@@ -350,21 +353,17 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
 
         var idx = sgy * hmCols + sgx;
 
-        // Weighted light intensity: each color's contribution is
-        // scaled by its user-configured STRENGTH slider.
-        // This lets you tune which beams have more gravitational
-        // pull — e.g. turn up blue+yellow (convergent beams) and
-        // turn down green+red (divergent beams) to test whether
-        // convergent beams predict better.
-        //
-        // Direction sliders are ignored here (gravity doesn't care
-        // about up/down color coding, only brightness/mass).
-        // Strength 0 = this color has no gravitational pull.
-        // Strength 2 = this color pulls twice as hard.
-        var totalLight = hmGrids[G_GREEN][idx]  * cf.green.str
-                       + hmGrids[G_YELLOW][idx] * cf.yellow.str
-                       + hmGrids[G_BLUE][idx]   * cf.blue.str
-                       + hmGrids[G_RED][idx]    * cf.red.str;
+        // Read individual channels for both total brightness and color bias
+        var gVal = hmGrids[G_GREEN][idx];
+        var yVal = hmGrids[G_YELLOW][idx];
+        var bVal = hmGrids[G_BLUE][idx];
+        var rVal = hmGrids[G_RED][idx];
+
+        // Total light (weighted by user strength sliders) — for gravity
+        var totalLight = gVal * cf.green.str
+                       + yVal * cf.yellow.str
+                       + bVal * cf.blue.str
+                       + rVal * cf.red.str;
 
         if (totalLight < 0.005) continue;
 
@@ -373,15 +372,9 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
         // ---- CROSSOVER DISTANCE ----
         // Brighter zones have a larger "surface" — you hit the wall
         // from farther away. Dim zones only repel at point-blank.
-        //
-        // crossover = base + brightness_scaling
-        // At crossover distance, force transitions from attract to repel.
-        //
-        // Typical totalLight values range from 0.01 (faint) to 5+ (blazing).
-        // We want crossover ~2 cells for faint, ~6-8 for bright.
         var crossover = 2.0 + Math.sqrt(totalLight) * 2.5;
 
-        // ---- DIRECTION ----
+        // ---- GRAVITATIONAL DIRECTION ----
         // scan < 0 → light is ABOVE → "toward light" = UP (negative pixel-Y)
         // scan > 0 → light is BELOW → "toward light" = DOWN (positive pixel-Y)
         var towardLight = (scan < 0) ? -1.0 : 1.0;
@@ -390,33 +383,38 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
 
         if (dist <= crossover) {
           // ---- NEAR FIELD: REPULSION ----
-          // Inside the crossover radius, the zone is a wall.
-          // Force pushes AWAY from the light (bounce).
-          // Strength increases as you get closer (harder bounce at contact).
-          // Uses inverse-linear so it's strong but not explosive at dist=1.
-          var repelStrength = (crossover - dist) / crossover;  // 1.0 at contact, 0.0 at crossover
-          repelStrength = repelStrength * repelStrength;  // square for sharper near-field
-
-          // Push AWAY from light (opposite of towardLight)
+          var repelStrength = (crossover - dist) / crossover;
+          repelStrength = repelStrength * repelStrength;
           cellForce = -towardLight * totalLight * repelStrength * 0.6;
         } else {
           // ---- FAR FIELD: ATTRACTION ----
-          // Beyond the crossover, the zone pulls price toward it.
-          // This is the "price tests the level" behavior.
-          // Strength falls off with distance² (gravity-like).
           var farDist = dist - crossover;
           var attractStrength = 1.0 / (farDist * farDist * 0.08 + 1);
-
-          // Pull TOWARD light
           cellForce = towardLight * totalLight * attractStrength * 0.3;
         }
 
         // Scale force by resistance density at this cell's price level.
-        // Uses pre-computed grid-resolution lookup — direct array access.
         var cellDensity = (sgy >= 0 && sgy < hmRows) ? gridDensity[sgy] : 0;
         var densityMult = 0.3 + cellDensity * 1.7;
 
         force += cellForce * colWeight * densityMult;
+
+        // ---- COLOR BIAS DIRECTIONAL FORCE ----
+        // Independent of position — based purely on what COLOR the
+        // light is. Support light (blue+red) pushes price UP (negative
+        // pixel-Y). Resistance light (green+yellow) pushes price DOWN
+        // (positive pixel-Y). Falls off with distance so nearby color
+        // matters more than distant color.
+        if (cbForce > 0.001) {
+          var support = (bVal * cf.blue.str + rVal * cf.red.str);
+          var resist  = (gVal * cf.green.str + yVal * cf.yellow.str);
+          var bias = resist - support;  // positive = push DOWN, negative = push UP
+
+          // Distance falloff: nearby cells have much stronger influence
+          var proxWeight = 1.0 / (dist * 0.15 + 1);
+
+          force += bias * proxWeight * colWeight * cbForce * 0.15;
+        }
       }
     }
 
@@ -2369,7 +2367,12 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
   if (boundaryGx > 2) {
     // Sample the last 20% of the real candle zone
     var sampleStartGx = Math.floor(boundaryGx * 0.8);
-    var realIntensities = [];
+
+    // Use histogram binning instead of push+sort for the 85th percentile.
+    // At res=1 this avoids sorting ~400K values per frame.
+    var rlBinCount = 256;
+    var rlBins = new Uint32Array(rlBinCount);
+    var rlNonZero = 0;
 
     for (var rlgx = sampleStartGx; rlgx < boundaryGx; rlgx++) {
       for (var rlgy = 0; rlgy < hmRows; rlgy++) {
@@ -2377,15 +2380,35 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
         var rlVal = hmGrids[0][rlIdx] + hmGrids[1][rlIdx]
                   + hmGrids[2][rlIdx] + hmGrids[3][rlIdx];
         if (rlVal > 0.01) {
-          realIntensities.push(rlVal);
           if (rlVal > realLightMax) realLightMax = rlVal;
+          rlNonZero++;
         }
       }
     }
 
-    if (realIntensities.length > 10) {
-      realIntensities.sort(function(a, b) { return a - b; });
-      realLightBaseline = realIntensities[Math.floor(realIntensities.length * 0.85)];
+    if (rlNonZero > 10 && realLightMax > 0.01) {
+      // Second pass: bin values
+      var rlScale = (rlBinCount - 1) / realLightMax;
+      for (var rlgx2 = sampleStartGx; rlgx2 < boundaryGx; rlgx2++) {
+        for (var rlgy2 = 0; rlgy2 < hmRows; rlgy2++) {
+          var rlIdx2 = rlgy2 * hmCols + rlgx2;
+          var rlVal2 = hmGrids[0][rlIdx2] + hmGrids[1][rlIdx2]
+                     + hmGrids[2][rlIdx2] + hmGrids[3][rlIdx2];
+          if (rlVal2 > 0.01) {
+            rlBins[(rlVal2 * rlScale) | 0]++;
+          }
+        }
+      }
+      // Walk bins to find 85th percentile
+      var rlTarget = Math.floor(rlNonZero * 0.85);
+      var rlCum = 0;
+      for (var rlb = 0; rlb < rlBinCount; rlb++) {
+        rlCum += rlBins[rlb];
+        if (rlCum >= rlTarget) {
+          realLightBaseline = (rlb + 0.5) / rlScale;
+          break;
+        }
+      }
     }
   }
   // If baseline is too low, use a reasonable default
@@ -2668,24 +2691,29 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
   }
 
   // ---- CORRIDOR PATHFINDING (slime mold lookahead) ----
-  // Trace corridors through the signed topology to find where the
-  // paths of least resistance lead. This gives the prediction engine
-  // lookahead: "the corridor ahead curves upward over the next 20 steps."
+  // Trace corridors through the total-pressure topology to find where
+  // the paths of least resistance lead. This gives the prediction
+  // engine lookahead: "the corridor ahead curves upward over 20 steps."
   //
-  // Corridors always trace to the far right edge of the topology grid
-  // (which covers the full world), not just the projection zone. With
-  // fewer visible candles the terrain is sparser, but the corridors
-  // still show the best guess through whatever terrain exists. They'll
-  // update as more candles are revealed and the terrain fills in.
+  // maxStepGy constrains the corridor: each step can't move more than
+  // one average candle body in grid cells. Entry regime info lets
+  // corridor scoring favor momentum-aligned paths.
+
+  // maxStepGy: maximum step size in grid cells (for corridor + signal)
+  var maxStepGy = maxStepPx / resolution;
+  if (maxStepGy < 0.5) maxStepGy = 0.5;
+
   var corridorData = null;
   if (state.predCorridor && topo && typeof traceCorridors === "function") {
     var corridorSteps = Math.max(projSlots, hmCols - entryGx - 1);
-    corridorData = traceCorridors(topo, entryGx, entryGy, corridorSteps, 15, 30);
+    var corridorOpts = {
+      entrySlope: entryRegime ? entryRegime.score : 0,  // positive = bullish
+      maxStepGy:  maxStepGy                              // max Y movement per column
+    };
+    corridorData = traceCorridors(topo, entryGx, entryGy, corridorSteps, 15, 30, corridorOpts);
   }
 
-  // maxStepGy: maximum step size in grid cells (for corridor signal normalization)
-  var maxStepGy = maxStepPx / resolution;
-  if (maxStepGy < 0.5) maxStepGy = 0.5;
+  // (maxStepGy already computed above for corridor + signal normalization)
 
   // Capture the pipeline's per-layer opinions from the FIRST prediction
   // step (the +1 candle). This gets stored with the pending prediction
