@@ -173,61 +173,64 @@
   <!-- ==================== TOOLBAR ==================== -->
   <div id="toolbar">
     <span class="toolbar-label">MODE</span>
-    <button class="btn active" id="btn-raycast" onclick="setMode('raycast')">☀ Raycast</button>
-    <button class="btn" id="btn-particle" onclick="setMode('particle')">≋ Wind Tunnel</button>
-    <button class="btn" id="btn-sightlines" onclick="setMode('sightlines')">⁄ Sight Lines</button>
+    <button class="btn active" id="btn-raycast" onclick="setMode('raycast')" title="Raycast heatmap — colored light beams show support/resistance pressure">☀ Raycast</button>
+    <button class="btn" id="btn-particle" onclick="setMode('particle')" title="Wind tunnel — particles flow through the pressure terrain">≋ Wind Tunnel</button>
+    <button class="btn" id="btn-sightlines" onclick="setMode('sightlines')" title="Sight lines — direct high-to-high and low-to-low connections">⁄ Sight Lines</button>
 
     <span class="toolbar-sep"></span>
 
     <span class="toolbar-label">ASSET</span>
-    <button class="btn active" id="btn-SOL" onclick="setAsset('SOL')">SOL</button>
-    <button class="btn" id="btn-ETH" onclick="setAsset('ETH')">ETH</button>
-    <button class="btn" id="btn-BTC" onclick="setAsset('BTC')">BTC</button>
-    <button class="btn" id="btn-overlay" onclick="toggleOverlay()">⊕ Overlay</button>
+    <button class="btn active" id="btn-SOL" onclick="setAsset('SOL')" title="Solana / USD">SOL</button>
+    <button class="btn" id="btn-ETH" onclick="setAsset('ETH')" title="Ethereum / USD">ETH</button>
+    <button class="btn" id="btn-BTC" onclick="setAsset('BTC')" title="Bitcoin / USD">BTC</button>
+    <button class="btn" id="btn-overlay" onclick="toggleOverlay()" title="Show all three assets overlaid with market-cap weighting">⊕ Overlay</button>
 
     <span class="toolbar-sep"></span>
 
-    <button class="btn active" id="btn-candles" onclick="toggleCandles()">◼ Candles</button>
-    <button class="btn active" id="btn-projection" onclick="toggleProjection()">◉ Projection</button>
+    <button class="btn active" id="btn-candles" onclick="toggleCandles()" title="Show/hide candlestick chart">◼ Candles</button>
+    <button class="btn active" id="btn-projection" onclick="toggleProjection()" title="Show/hide prediction projection zone">◉ Projection</button>
+  </div>
 
-    <span class="toolbar-sep"></span>
+  <!-- ==================== RAYCAST / OVERLAY CONTROLS ==================== -->
+  <div id="raycast-bar" style="display:flex; align-items:center; gap:8px; padding:5px 14px;
+       border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:wrap;">
     <span class="toolbar-label">OVERLAY</span>
-    <button class="btn" id="btn-show-ma"  onclick="toggleOverlayLine('MA')"  style="color:#f0a030;">MA</button>
-    <button class="btn" id="btn-show-rsi" onclick="toggleOverlayLine('RSI')" style="color:#c060f0;">RSI</button>
-    <button class="btn" id="btn-show-lsr" onclick="toggleOverlayLine('LSR')" style="color:#40c0f0;">LSSA</button>
+    <button class="btn" id="btn-show-ma"  onclick="toggleOverlayLine('MA')"  style="color:#f0a030;" title="Moving average line overlay">MA</button>
+    <button class="btn" id="btn-show-rsi" onclick="toggleOverlayLine('RSI')" style="color:#c060f0;" title="RSI (Relative Strength Index) overlay">RSI</button>
+    <button class="btn" id="btn-show-lsr" onclick="toggleOverlayLine('LSR')" style="color:#40c0f0;" title="LSSA spectral analysis overlay">LSSA</button>
 
     <div class="slider-group" id="res-group">
       <span class="toolbar-label">RES</span>
       <input type="range" class="slider-input" id="res-slider" min="1" max="6" step="1" value="4"
-             oninput="setResolution(+this.value)">
+             oninput="setResolution(+this.value)" title="Heatmap grid resolution — lower = finer detail, higher = faster">
     </div>
 
     <div class="slider-group" id="translucency-group">
       <span class="toolbar-label">OPACITY</span>
       <input type="range" class="slider-input" id="translucency-slider" min="0" max="100" step="1" value="50"
-             oninput="setTranslucency(+this.value)">
+             oninput="setTranslucency(+this.value)" title="How much candle bodies attenuate passing beams">
       <span class="slider-val" id="translucency-val">50%</span>
     </div>
 
     <div class="slider-group" id="beam-len-group">
       <span class="toolbar-label">LENGTH→GLOW</span>
       <input type="range" class="slider-input" id="beam-len-slider" min="0" max="100" step="5" value="100"
-             oninput="setBeamLenBoost(+this.value)">
+             oninput="setBeamLenBoost(+this.value)" title="Boost beam brightness based on total travel distance">
       <span class="slider-val" id="beam-len-val">100%</span>
     </div>
 
-    <button class="btn" id="btn-rays-only" onclick="toggleRaysOnly()" style="display:none;">◎ Rays Only</button>
+    <button class="btn" id="btn-rays-only" onclick="toggleRaysOnly()" style="display:none;" title="Show only beam rays without the heatmap fill">◎ Rays Only</button>
 
     <div class="slider-group" id="beam-spread-group" style="display:none;">
       <span class="toolbar-label">SPREAD</span>
       <input type="range" class="slider-input" id="beam-spread-slider" min="0" max="45" step="1" value="15"
-             oninput="setBeamSpread(+this.value)">
+             oninput="setBeamSpread(+this.value)" title="Fan angle for beam cone spread">
       <span class="slider-val" id="beam-spread-val">15°</span>
     </div>
 
     <div class="slider-group" id="intensity-group">
       <span class="toolbar-label">INTENSITY</span>
-      <select id="intensity-select" onchange="setIntensityMode(this.value)">
+      <select id="intensity-select" onchange="setIntensityMode(this.value)" title="How beam brightness scales with indicator values">
         <option value="none">Uniform</option>
         <option value="ma_far">MA: Far = Bright</option>
         <option value="ma_near" selected>MA: Near = Bright</option>
@@ -239,19 +242,19 @@
     <!-- Sight line mode toggles (only visible in sightlines mode) -->
     <div id="sl-toggles" style="display:none; align-items:center; gap:6px; flex-wrap:wrap;">
       <span class="toolbar-sep"></span>
-      <button class="btn active" id="btn-sl-base" onclick="toggleSL('base')">Base Lines</button>
-      <button class="btn" id="btn-sl-rays" onclick="toggleSL('rays')">Extend Rays</button>
-      <button class="btn" id="btn-sl-macro" onclick="toggleSL('macro')">Macro Trends</button>
+      <button class="btn active" id="btn-sl-base" onclick="toggleSL('base')" title="Direct high-to-high and low-to-low connections between candles">Base Lines</button>
+      <button class="btn" id="btn-sl-rays" onclick="toggleSL('rays')" title="Extend sight lines as rays into the future">Extend Rays</button>
+      <button class="btn" id="btn-sl-macro" onclick="toggleSL('macro')" title="Longer-term trend lines connecting distant candles">Macro Trends</button>
       <div class="slider-group">
         <span class="toolbar-label">ANGLE°</span>
         <input type="range" class="slider-input" id="macro-angle-slider" min="1" max="10" step="0.5" value="3"
-               oninput="setMacroAngle(+this.value)">
+               oninput="setMacroAngle(+this.value)" title="Maximum angle for macro trend line detection">
         <span class="slider-val" id="macro-angle-val">3°</span>
       </div>
       <div class="slider-group">
         <span class="toolbar-label">LENGTH→STRENGTH</span>
         <input type="range" class="slider-input" id="momentum-slider" min="0" max="100" step="5" value="0"
-               oninput="setMomentum(+this.value)">
+               oninput="setMomentum(+this.value)" title="Weight longer sight lines more heavily">
         <span class="slider-val" id="momentum-val">0%</span>
       </div>
     </div>
@@ -261,13 +264,14 @@
   <div id="data-bar" style="display:flex; align-items:center; gap:8px; padding:6px 14px;
        border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:wrap;">
     <span class="toolbar-label">DATA</span>
-    <button class="btn" id="btn-live" onclick="fetchLiveRouter()">⟳ Fetch Live</button>
+    <button class="btn" id="btn-live" onclick="fetchLiveRouter()" title="Fetch live market data from the selected source">⟳ Fetch Live</button>
     <button class="btn" id="btn-ticker" onclick="toggleLiveTicker()"
             title="Poll current price every 1-2s and update the last candle">◉ Live Price</button>
-    <button class="btn" id="btn-generated" onclick="useGenerated()">⚡ Generated</button>
+    <button class="btn" id="btn-generated" onclick="useGenerated()" title="Use randomly generated candle data for testing">⚡ Generated</button>
     <span class="toolbar-sep"></span>
     <span class="toolbar-label">SOURCE</span>
     <select id="data-source-select" onchange="onDataSourceChange()"
+            title="Choose between Binance and CoinGecko market data"
             style="background:rgba(255,255,255,0.06); color:#8892a4;
             border:1px solid rgba(255,255,255,0.12); border-radius:4px; padding:4px 8px;
             font-family:inherit; font-size:11px;">
@@ -277,6 +281,7 @@
     <!-- CoinGecko API key input — hidden by default, shown when CG is selected -->
     <span id="cg-key-area" style="display:none;">
       <input id="cg-key-input" type="password" placeholder="Demo API key"
+             title="Enter your free CoinGecko Demo API key"
              style="background:rgba(255,255,255,0.06); color:#8892a4;
              border:1px solid rgba(255,255,255,0.12); border-radius:4px; padding:4px 8px;
              font-family:inherit; font-size:10px; width:140px;"
@@ -290,7 +295,7 @@
     </span>
     <span class="toolbar-sep"></span>
     <span class="toolbar-label">RANGE</span>
-    <select id="interval-select" style="background:rgba(255,255,255,0.06); color:#8892a4;
+    <select id="interval-select" title="Time range and candle interval for market data" style="background:rgba(255,255,255,0.06); color:#8892a4;
             border:1px solid rgba(255,255,255,0.12); border-radius:4px; padding:4px 8px;
             font-family:inherit; font-size:11px;">
       <option value="1" selected>24h (5m candles)</option>
@@ -321,18 +326,18 @@
   <!-- ==================== ANIMATION BAR ==================== -->
   <div id="anim-bar" style="display:flex; align-items:center; gap:8px; padding:6px 14px;
        border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:wrap;">
-    <button class="btn" id="btn-play" onclick="togglePlay()">▶ Play</button>
-    <button class="btn" id="btn-reset" onclick="resetAnim()">⏮ Reset</button>
+    <button class="btn" id="btn-play" onclick="togglePlay()" title="Animate candles left-to-right, rebuilding predictions at each step to measure accuracy">▶ Play</button>
+    <button class="btn" id="btn-reset" onclick="resetAnim()" title="Reset animation to the beginning">⏮ Reset</button>
     <div class="slider-group">
       <span class="toolbar-label">SPEED</span>
       <input type="range" class="slider-input" id="speed-slider" min="1" max="20" step="1" value="20"
-             oninput="setAnimSpeed(+this.value)">
+             oninput="setAnimSpeed(+this.value)" title="Animation speed — candles revealed per second">
       <span class="slider-val" id="speed-val">20/s</span>
     </div>
     <div class="slider-group" style="flex:1; min-width:120px;">
       <span class="toolbar-label">PROGRESS</span>
       <input type="range" style="flex:1; accent-color:#5af;" id="progress-slider" min="1" max="120" step="1" value="120"
-             oninput="scrubAnim(+this.value)">
+             oninput="scrubAnim(+this.value)" title="Scrub through the animation timeline">
       <span class="slider-val" id="progress-val" style="min-width:50px;">120/120</span>
     </div>
   </div>
@@ -346,56 +351,56 @@
 
     <!-- GREEN -->
     <span style="color:#1edc5a; font-weight:bold; font-size:10px;">■ GRN</span>
-    <select id="cf-green-dir" style="background:rgba(255,255,255,0.06); color:#8892a4;
+    <select id="cf-green-dir" title="Green beam force direction — which way green light pushes price" style="background:rgba(255,255,255,0.06); color:#8892a4;
             border:1px solid rgba(255,255,255,0.12); border-radius:3px; padding:2px 4px;
             font-family:inherit; font-size:10px;" onchange="setColorForce('green','dir',this.value)">
       <option value="1" selected>▼ Down</option>
       <option value="-1">▲ Up</option>
     </select>
     <input type="range" style="width:40px; accent-color:#1edc5a;" min="0" max="200" step="10" value="100"
-           id="cf-green-str" oninput="setColorForce('green','str',this.value)">
+           id="cf-green-str" oninput="setColorForce('green','str',this.value)" title="Green beam force strength multiplier">
     <span class="slider-val" id="cf-green-val" style="min-width:20px;">1.0</span>
 
     <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 2px;"></span>
 
     <!-- YELLOW -->
     <span style="color:#f0c828; font-weight:bold; font-size:10px;">■ YEL</span>
-    <select id="cf-yellow-dir" style="background:rgba(255,255,255,0.06); color:#8892a4;
+    <select id="cf-yellow-dir" title="Yellow beam force direction" style="background:rgba(255,255,255,0.06); color:#8892a4;
             border:1px solid rgba(255,255,255,0.12); border-radius:3px; padding:2px 4px;
             font-family:inherit; font-size:10px;" onchange="setColorForce('yellow','dir',this.value)">
       <option value="1" selected>▼ Down</option>
       <option value="-1">▲ Up</option>
     </select>
     <input type="range" style="width:40px; accent-color:#f0c828;" min="0" max="200" step="10" value="100"
-           id="cf-yellow-str" oninput="setColorForce('yellow','str',this.value)">
+           id="cf-yellow-str" oninput="setColorForce('yellow','str',this.value)" title="Yellow beam force strength multiplier">
     <span class="slider-val" id="cf-yellow-val" style="min-width:20px;">1.0</span>
 
     <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 2px;"></span>
 
     <!-- BLUE -->
     <span style="color:#288cff; font-weight:bold; font-size:10px;">■ BLU</span>
-    <select id="cf-blue-dir" style="background:rgba(255,255,255,0.06); color:#8892a4;
+    <select id="cf-blue-dir" title="Blue beam force direction" style="background:rgba(255,255,255,0.06); color:#8892a4;
             border:1px solid rgba(255,255,255,0.12); border-radius:3px; padding:2px 4px;
             font-family:inherit; font-size:10px;" onchange="setColorForce('blue','dir',this.value)">
       <option value="1">▼ Down</option>
       <option value="-1" selected>▲ Up</option>
     </select>
     <input type="range" style="width:40px; accent-color:#288cff;" min="0" max="200" step="10" value="100"
-           id="cf-blue-str" oninput="setColorForce('blue','str',this.value)">
+           id="cf-blue-str" oninput="setColorForce('blue','str',this.value)" title="Blue beam force strength multiplier">
     <span class="slider-val" id="cf-blue-val" style="min-width:20px;">1.0</span>
 
     <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 2px;"></span>
 
     <!-- RED -->
     <span style="color:#f03232; font-weight:bold; font-size:10px;">■ RED</span>
-    <select id="cf-red-dir" style="background:rgba(255,255,255,0.06); color:#8892a4;
+    <select id="cf-red-dir" title="Red beam force direction" style="background:rgba(255,255,255,0.06); color:#8892a4;
             border:1px solid rgba(255,255,255,0.12); border-radius:3px; padding:2px 4px;
             font-family:inherit; font-size:10px;" onchange="setColorForce('red','dir',this.value)">
       <option value="1">▼ Down</option>
       <option value="-1" selected>▲ Up</option>
     </select>
     <input type="range" style="width:40px; accent-color:#f03232;" min="0" max="200" step="10" value="100"
-           id="cf-red-str" oninput="setColorForce('red','str',this.value)">
+           id="cf-red-str" oninput="setColorForce('red','str',this.value)" title="Red beam force strength multiplier">
     <span class="slider-val" id="cf-red-val" style="min-width:20px;">1.0</span>
   </div>
 
@@ -409,7 +414,7 @@
     <!-- Candle Attraction — pulls particles toward nearest candle's high/low range -->
     <span style="color:#8892a4; font-size:10px;">Candle Pull</span>
     <input type="range" class="slider-input" id="candle-attract-slider" min="0" max="200" step="5" value="80"
-           style="width:70px;" oninput="setParticleParam('candleAttract', this.value)">
+           style="width:70px;" oninput="setParticleParam('candleAttract', this.value)" title="How strongly particles are pulled toward candle high/low ranges">
     <span class="slider-val" id="candle-attract-val" style="min-width:24px;">0.80</span>
 
     <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 4px;"></span>
@@ -417,7 +422,7 @@
     <!-- Particle Repulsion -->
     <span style="color:#8892a4; font-size:10px;">Repulsion</span>
     <input type="range" class="slider-input" id="particle-repulse-slider" min="0" max="200" step="5" value="35"
-           style="width:70px;" oninput="setParticleParam('repulsion', this.value)">
+           style="width:70px;" oninput="setParticleParam('repulsion', this.value)" title="How strongly particles push away from crowded areas">
     <span class="slider-val" id="particle-repulse-val" style="min-width:24px;">0.35</span>
 
     <span style="width:1px; height:14px; background:rgba(255,255,255,0.08); margin:0 4px;"></span>
@@ -425,47 +430,69 @@
     <!-- Particle Size -->
     <span style="color:#8892a4; font-size:10px;">Size</span>
     <input type="range" class="slider-input" id="particle-size-slider" min="10" max="120" step="5" value="60"
-           style="width:60px;" oninput="setParticleParam('size', this.value)">
+           style="width:60px;" oninput="setParticleParam('size', this.value)" title="Visual size of particles">
     <span class="slider-val" id="particle-size-val" style="min-width:24px;">6.0</span>
 
     <!-- Debug: show attractor zones so you can verify placement -->
-    <button class="btn" id="btn-show-attractors" onclick="toggleAttractorDebug()" style="font-size:10px; padding:3px 8px;">👁 Attractors</button>
+    <button class="btn" id="btn-show-attractors" onclick="toggleAttractorDebug()" style="font-size:10px; padding:3px 8px;" title="Show candle attractor zones for debugging particle behavior">👁 Attractors</button>
   </div>
 
   <!-- ==================== PREDICTION MODEL BAR ==================== -->
   <!-- Toggle individual force components on/off. Shown when projection is on. -->
   <div id="pred-model-bar" style="display:none; align-items:center; gap:8px; padding:5px 14px;
-       border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:wrap; font-size:11px;">
+       border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:nowrap; font-size:11px; overflow-x:auto;">
+
     <span class="toolbar-label">MODEL</span>
-    <button class="btn active" id="btn-pred-light" onclick="togglePred('Light')" style="font-size:10px; padding:3px 8px;">☀ Light</button>
-    <button class="btn" id="btn-pred-ma"    onclick="togglePred('MA')"    style="font-size:10px; padding:3px 8px;">〰 MA</button>
-    <button class="btn" id="btn-pred-rsi"   onclick="togglePred('RSI')"   style="font-size:10px; padding:3px 8px;">⚡ RSI</button>
-    <button class="btn active" id="btn-pred-vol"   onclick="togglePred('Vol')"   style="font-size:10px; padding:3px 8px;">📊 Volume</button>
-    <button class="btn" id="btn-pred-lsr"   onclick="togglePred('LSR')"   style="font-size:10px; padding:3px 8px;">📈 LSSA</button>
-    <span style="width:1px; height:14px; background:rgba(255,255,255,0.12); margin:0 2px;"></span>
-    <button class="btn" id="btn-pred-calib"   onclick="togglePred('Calib')"   style="font-size:10px; padding:3px 8px;">🔧 Calibrate</button>
-    <button class="btn" id="btn-pred-vbeam"   onclick="togglePred('VBeam')"   style="font-size:10px; padding:3px 8px;">💡 V.Beams</button>
-    <div class="slider-group" id="vbeam-str-group" style="margin-left:-4px;">
-      <input type="range" style="width:40px; accent-color:#ffcc00;" min="0" max="100" step="5" value="50"
-             id="vbeam-str-slider" oninput="setVBeamStr(+this.value)">
-      <span class="slider-val" id="vbeam-str-val" style="min-width:24px;">50%</span>
-    </div>
-    <button class="btn active" id="btn-pred-topo"    onclick="togglePred('Topo')"    style="font-size:10px; padding:3px 8px;">🗺 Topo</button>
-    <button class="btn active" id="btn-pred-corridor" onclick="togglePred('Corridor')" style="font-size:10px; padding:3px 8px;">🫠 Corridor</button>
+    <button class="btn active" id="btn-pred-light" onclick="togglePred('Light')" style="font-size:10px; padding:3px 8px;"
+            title="Light pressure field — the core beam-based signal">☀ Light</button>
+    <button class="btn active" id="btn-pred-vol"   onclick="togglePred('Vol')"   style="font-size:10px; padding:3px 8px;"
+            title="Volume-weighted signal — scales beam intensity by trade volume">📊 Volume</button>
+    <button class="btn active" id="btn-pred-topo"    onclick="togglePred('Topo')"    style="font-size:10px; padding:3px 8px;"
+            title="Topology terrain — elevation field guides prediction paths">🗺 Topo</button>
+    <button class="btn active" id="btn-pred-corridor" onclick="togglePred('Corridor')" style="font-size:10px; padding:3px 8px;"
+            title="FABRIK corridor pathfinder — finds paths of least resistance">🫠 Corridor</button>
     <div class="slider-group" id="color-bias-group" style="margin-left:-4px;">
       <label style="font-size:9px; color:#8892a4; margin-right:2px;">S/R Bias</label>
       <input type="range" style="width:40px; accent-color:#66ccff;" min="0" max="100" step="5" value="25"
-             id="color-bias-slider" oninput="setColorBiasForce(+this.value)">
+             id="color-bias-slider" oninput="setColorBiasForce(+this.value)"
+             title="Support/resistance directional bias strength for corridors and particles">
       <span class="slider-val" id="color-bias-val" style="min-width:24px;">25%</span>
     </div>
-    <span style="width:1px; height:14px; background:rgba(255,255,255,0.12); margin:0 2px;"></span>
-    <button class="btn active" id="btn-pred-intrev"   onclick="togglePred('IntRev')"   style="font-size:10px; padding:3px 8px;">💥 Int Rev</button>
-    <button class="btn active" id="btn-pred-minstep"  onclick="togglePred('MinStep')"  style="font-size:10px; padding:3px 8px;">⬇ Min Step</button>
-    <div class="toolbar-sep"></div>
-    <button class="btn" id="btn-contours" onclick="toggleContours()" style="font-size:10px; padding:3px 8px;">◎ Contours</button>
-    <button class="btn" id="btn-contour-fill" onclick="toggleContourFill()" style="font-size:10px; padding:3px 8px;">▦ Topo Fill</button>
-    <button class="btn" id="btn-corridors" onclick="toggleCorridorViz()" style="font-size:10px; padding:3px 8px;">🫠 Corridors</button>
-    <button class="btn active" id="btn-proj-info" onclick="toggleProjInfo()" style="font-size:10px; padding:3px 8px;">ℹ Proj Info</button>
+    <button class="btn active" id="btn-pred-intrev"   onclick="togglePred('IntRev')"   style="font-size:10px; padding:3px 8px;"
+            title="Interval reversal detection — identifies overextended moves">💥 Int Rev</button>
+    <button class="btn active" id="btn-pred-minstep"  onclick="togglePred('MinStep')"  style="font-size:10px; padding:3px 8px;"
+            title="Minimum step size — prevents prediction from stalling">⬇ Min Step</button>
+    <span style="width:1px; height:14px; background:rgba(255,255,255,0.12); margin:0 2px; flex-shrink:0;"></span>
+    <button class="btn" id="btn-pred-ma"    onclick="togglePred('MA')"    style="font-size:10px; padding:3px 8px;"
+            title="Moving average spring (off — traditional indicator, not light-based)">〰 MA</button>
+    <button class="btn" id="btn-pred-rsi"   onclick="togglePred('RSI')"   style="font-size:10px; padding:3px 8px;"
+            title="RSI mean-reversion (off — traditional indicator, not light-based)">⚡ RSI</button>
+    <button class="btn" id="btn-pred-lsr"   onclick="togglePred('LSR')"   style="font-size:10px; padding:3px 8px;"
+            title="LSSA spectral analysis (off — traditional indicator, not light-based)">📈 LSSA</button>
+    <button class="btn" id="btn-pred-calib"   onclick="togglePred('Calib')"   style="font-size:10px; padding:3px 8px;"
+            title="Use calibrated indicator weights from background data">🔧 Calibrate</button>
+    <button class="btn" id="btn-pred-vbeam"   onclick="togglePred('VBeam')"   style="font-size:10px; padding:3px 8px;"
+            title="Virtual beams — prediction emits its own light into the future">💡 V.Beams</button>
+    <div class="slider-group" id="vbeam-str-group" style="margin-left:-4px;">
+      <input type="range" style="width:40px; accent-color:#ffcc00;" min="0" max="100" step="5" value="50"
+             id="vbeam-str-slider" oninput="setVBeamStr(+this.value)" title="Virtual beam intensity">
+      <span class="slider-val" id="vbeam-str-val" style="min-width:24px;">50%</span>
+    </div>
+  </div>
+
+  <!-- ==================== DISPLAY OPTIONS BAR ==================== -->
+  <!-- Visualization overlays — separate row so MODEL doesn't wrap. -->
+  <div id="pred-display-bar" style="display:none; align-items:center; gap:8px; padding:4px 14px;
+       border-bottom:1px solid rgba(255,255,255,0.06); font-size:11px;">
+    <span class="toolbar-label">DISPLAY</span>
+    <button class="btn" id="btn-contours" onclick="toggleContours()" style="font-size:10px; padding:3px 8px;"
+            title="Topographic contour lines — shows elevation ridges and valleys">◎ Contours</button>
+    <button class="btn" id="btn-contour-fill" onclick="toggleContourFill()" style="font-size:10px; padding:3px 8px;"
+            title="Greyscale elevation fill behind contour lines">▦ Topo Fill</button>
+    <button class="btn" id="btn-corridors" onclick="toggleCorridorViz()" style="font-size:10px; padding:3px 8px;"
+            title="Corridor paths — colored dashed lines showing paths of least resistance">🫠 Corridors</button>
+    <button class="btn active" id="btn-proj-info" onclick="toggleProjInfo()" style="font-size:10px; padding:3px 8px;"
+            title="Projection text overlay — direction, target price, confidence, accuracy stats">ℹ Proj Info</button>
   </div>
 
   <div id="canvas-wrap">

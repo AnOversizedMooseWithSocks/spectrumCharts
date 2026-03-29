@@ -362,6 +362,10 @@ function updateToolbar() {
   if (predBar) {
     predBar.style.display = state.showProjection ? "flex" : "none";
   }
+  var predDisplayBar = document.getElementById("pred-display-bar");
+  if (predDisplayBar) {
+    predDisplayBar.style.display = state.showProjection ? "flex" : "none";
+  }
   setActive("btn-pred-light", state.predLight);
   setActive("btn-pred-ma",    state.predMA);
   setActive("btn-pred-rsi",   state.predRSI);
