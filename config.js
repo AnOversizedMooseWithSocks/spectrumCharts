@@ -60,6 +60,7 @@ var CONFIG = {
     SOL: { candle: "#9945ff", particle: "#c084fc", heatHi: "#9945ff" },
     ETH: { candle: "#627eea", particle: "#93b5ff", heatHi: "#627eea" },
     BTC: { candle: "#f7931a", particle: "#fbbf24", heatHi: "#f7931a" },
+    STOCK_COLOR: { candle: "#00d4ff", particle: "#00d4ff", heatHi: "#00d4ff" },
   },
 
   CANDLE_COUNT: 120,  // how many candles to generate
