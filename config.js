@@ -123,6 +123,7 @@ var state = {
   predVBeamStr: 0.5,  // VBeam intensity multiplier (0..1, slider-controlled)
   predTopo:  true,    // topological flow field forces (ridges, valleys, gradient)
   predCorridor: true, // slime mold corridor pathfinding (lookahead through topology)
+  predCannon: false,  // cannon exhaustion zones as momentum signal (OFF by default)
   colorBiasForce: 0.25, // how strongly color bias (S/R polarity) pushes particles/corridors vertically
   predDistFade: false, // distance fade (OFF)
   predIntRev: true,   // intensity reversal: dampens/flips signal when beam brightness is unrealistic
@@ -133,6 +134,8 @@ var state = {
   contourFlow:  false, // draw sparse flow-direction arrows (noisy, off by default)
   contourFill:  false,  // draw greyscale elevation fill behind contour lines
   showCorridors: true,  // draw corridor pathfinding overlay (green dashed lines)
+  showCannons: false,        // fun mode: cannons on top of candles, firing cannonballs
+  showCannonZones: false,   // display exhaustion zone bands from cannon splat clustering
   showAttractorDebug: false, // draw particle attractor zones for visual verification
 
   // -- Indicator overlay visibility --

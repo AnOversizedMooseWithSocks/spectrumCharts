@@ -148,11 +148,13 @@ The MODEL bar lets you toggle individual force components:
 | 📊 Volume | Volume-weighted momentum — high volume amplifies the current direction. |
 | 📈 LSSA | Least-squares spectral analysis — extrapolates dominant price cycles. |
 | 🔧 Calibrate | Applies bias correction from historical accuracy tracking. |
-| 💡 V.Beams | Virtual beams — the predicted candles themselves emit light back into the field. |
+| 💡 V.Beams | Virtual beams — predicted candles emit light back into the field using the same beam physics as real candles (peak/trough filtering, beam spread, collision-walked rays, momentum-based intensity). |
 | 🗺 Topo | Topology gradient — follows the terrain's path of least resistance. |
 | 🫠 Corridor | Slime-mold pathfinding — traces optimal routes through the pressure field. |
+| 💥 Cannon | Cannon S/R — fires momentum cannons from real and predicted candle peaks/valleys. Exhaustion zones where balls cluster become support/resistance forces. |
 | 💥 Int Rev | Intensity reversal — high pressure zones act as barriers, not attractors. |
 | ⬇ Min Step | Minimum step size — prevents prediction from stalling in flat zones. |
+| S/R Bias | Controls how much the support/resistance polarity influences particles and corridor routing. 0% = unsigned pressure only, 100% = full directional bias. |
 
 ### Color Force Tuning
 
@@ -163,11 +165,35 @@ The FORCE bar lets you adjust how each heatmap color translates into prediction 
 
 The defaults encode the core S/R physics: green (strong resistance above) pushes down, red (strong support below) pushes up. But you can experiment — flipping a direction or zeroing a color changes the prediction character entirely.
 
+### Accuracy Tracking
+
+After calibration (a full Play cycle), the projection zone header shows rolling prediction accuracy:
+
+- **Direction** — the headline "BULLISH / BEARISH / NEUTRAL" call with confidence percentage.
+- **Target** — the consensus end price and percentage change from current.
+- **Sparkline chart** — a rolling accuracy graph showing hit/miss dots (green = correct direction, red = wrong) and a rolling accuracy line. The dashed AVG line shows the overall rate. The 50% baseline marks coin-flip territory.
+- **Last 10 / Total** — the most recent 10 first-candle predictions' direction accuracy, and the cumulative rate across all samples.
+
+All accuracy text is controlled by the **ℹ Proj Info** toggle in the DISPLAY bar.
+
 ### Overlays
 
 - **◎ Contours** — draws contour lines of equal pressure on the heatmap, like a topographic map.
 - **▦ Topo Fill** — fills valleys (low pressure) with cool blue and ridges (high pressure) with warm orange.
 - **🫠 Corridors** — shows the corridor pathfinder's traced routes as green dashed lines.
+- **ℹ Proj Info** — toggles the projection zone text overlay (direction, target, confidence, accuracy sparkline). Hide it to see just the visual elements.
+- **💥 Exhaustion** — shows cannon momentum exhaustion zones as horizontal bands. Yellow = support (downward momentum dies here), blue = resistance (upward momentum dies here).
+
+
+## Candle Cannons
+
+Cannons fire from peaks and valleys in the candle data. Each cannon aims at the average of its neighbors' closes and launches a ball on a parabolic arc. Peaks fire downward (yellow, gravity pulls down); valleys fire upward (blue, inverted gravity).
+
+Balls collide with candle bodies using segment-vs-AABB testing and leave splat markers where they hit. The system is fully deterministic — trajectories are pre-computed once when data changes, then drawn as static geometry with zero per-frame physics.
+
+When the **Cannon** model toggle is active, the system extends into the projection zone. Cannons fire from peaks and valleys of the predicted virtual candles, colliding with both real and virtual candle bodies. The splat positions from both real and projected cannons are binned into exhaustion zones that feed directional S/R signals into the prediction pipeline.
+
+Toggle **🔫 Cannons** to show the visual trails and barrels. Toggle **💥 Exhaustion** to show the S/R bands. The **Cannon** model toggle controls whether the signal feeds into predictions (it works even when the visuals are hidden).
 
 
 ## Live Price Ticker
@@ -184,7 +210,7 @@ The ticker auto-stops when you fetch new data, switch to generated data, or clic
 - **Scroll wheel**: zoom in/out, centered on the cursor.
 - **Click + drag**: pan the chart.
 - **Double-click**: reset zoom and pan.
-- **Crosshair**: hover anywhere to see price level and candle index.
+- **Crosshair**: hover anywhere to see the price level (right edge pill) and time (bottom pill). In the projection zone, time shows as a future timestamp with a purple `(+N)` step indicator. Works at all zoom levels including zoomed out.
 
 
 ## Indicator Overlays
@@ -213,11 +239,13 @@ Click **⊕ Overlay** to render all three assets on the same chart simultaneousl
 | `config.js` | All configuration constants and shared state |
 | `data.js` | Candle generation, SMA, RSI, intensity weight calculations |
 | `coords.js` | Price-to-pixel mapping, chart dimensions, projection zone layout |
-| `drawing.js` | Candle rendering, grid lines, crosshair, indicator overlays |
+| `drawing.js` | Candle rendering, grid lines, indicator overlays |
 | `sightlines.js` | Build and render H→H / L→L sight lines, background S/R |
 | `webgl-heatmap.js` | GPU-accelerated heatmap rendering (WebGL) |
 | `gl-beams.js` | GPU beam accumulation (instanced quad rendering) |
+| `gl-pipeline.js` | Unified WebGL2 pipeline — beam segmentation, blur passes, grid readback |
 | `heatmap.js` | Build the four-color heatmap grids, CPU fallback rendering |
+| `cannons.js` | Candle cannons — peak/valley momentum simulation, exhaustion zones, projection cannons |
 | `calibrate-indicators.js` | MA/RSI physics calibration from background data |
 | `regime.js` | Bull/bear/neutral regime detection, 3-path prediction |
 | `signal-layers.js` | Layered signal pipeline (terrain → indicator → energy → meta) |
@@ -225,6 +253,7 @@ Click **⊕ Overlay** to render all three assets on the same chart simultaneousl
 | `corridor.js` | Slime-mold corridor pathfinding through the pressure field |
 | `gl-particles.js` | Three.js GPU particle renderer (bundled IIFE) |
 | `gl-particles-instanced.js` | WebGL2 instanced particle renderer (per-particle color) |
+| `gpu-particles.js` | WebGL2 point-sprite particle system — CPU physics, GPU rendering |
 | `particles.js` | Particle physics, emission, spatial grid, trail rendering |
 | `projection.js` | Multi-path prediction engine, calibration, scenario consensus |
 | `ui.js` | Event handlers, toolbar state management, legend updates |
@@ -258,7 +287,9 @@ drawing.js
 sightlines.js
 webgl-heatmap.js
 gl-beams.js
+gl-pipeline.js
 heatmap.js
+cannons.js
 calibrate-indicators.js
 regime.js
 signal-layers.js
@@ -266,6 +297,7 @@ topology.js
 corridor.js
 gl-particles.js
 gl-particles-instanced.js
+gpu-particles.js
 particles.js
 projection.js
 ui.js
@@ -354,3 +386,5 @@ The only thing stored in the browser is the CoinGecko API key (in localStorage) 
 - The most expensive operation is the O(n³) visibility pair computation (precomputed once when data loads or animation starts).
 - Particle trails use Float32Array ring buffers — zero garbage collection pressure. Trail rendering is batched into ~10 color groups for minimal canvas draw calls.
 - Background data (historical S/R) is cached in localStorage so page reloads don't require fresh API calls if the data is still within its freshness window.
+- Real cannon paths are pre-computed once per data change (~5ms for 40 balls × 300 steps). Projection cannon paths are cached separately and only recompute when the prediction changes.
+- Virtual beams (V.Beams) use the same peak/trough filtering and collision-walked rays as real beams, keeping the cost proportional to the number of meaningful emitters rather than all virtual candles.

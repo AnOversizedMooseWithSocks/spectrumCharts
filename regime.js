@@ -247,7 +247,8 @@ function initPaths(entryRegime) {
       // In a bull regime, bull path follows corridors more (continuation)
       // In a bear regime, bull path is the contrarian — less corridor trust
       corrWeight: isBull ? 0.35 : isBear ? 0.15 : 0.25,
-      lssaWeight: 0.15
+      lssaWeight: 0.15,
+      cannonWeight: 0.20
     },
     {
       name: "Neutral",
@@ -255,7 +256,8 @@ function initPaths(entryRegime) {
       regimeBias: 0.0,
       // Neutral path always has balanced corridor/LSSA trust
       corrWeight: 0.25,
-      lssaWeight: 0.15
+      lssaWeight: 0.15,
+      cannonWeight: 0.20
     },
     {
       name: "Bear",
@@ -263,7 +265,8 @@ function initPaths(entryRegime) {
       regimeBias: 0.6,
       // Mirror of bull path
       corrWeight: isBear ? 0.35 : isBull ? 0.15 : 0.25,
-      lssaWeight: 0.15
+      lssaWeight: 0.15,
+      cannonWeight: 0.20
     }
   ];
 }

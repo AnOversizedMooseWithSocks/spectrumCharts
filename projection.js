@@ -2164,9 +2164,9 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
   } else {
     // Fallback if regime.js not loaded
     scenarios = [
-      { name: "Bull",    assumption: "bull",    regimeBias: 0.6, corrWeight: 0.25, lssaWeight: 0.15 },
-      { name: "Neutral", assumption: "neutral", regimeBias: 0.0, corrWeight: 0.25, lssaWeight: 0.15 },
-      { name: "Bear",    assumption: "bear",    regimeBias: 0.6, corrWeight: 0.25, lssaWeight: 0.15 }
+      { name: "Bull",    assumption: "bull",    regimeBias: 0.6, corrWeight: 0.25, lssaWeight: 0.15, cannonWeight: 0.20 },
+      { name: "Neutral", assumption: "neutral", regimeBias: 0.0, corrWeight: 0.25, lssaWeight: 0.15, cannonWeight: 0.20 },
+      { name: "Bear",    assumption: "bear",    regimeBias: 0.6, corrWeight: 0.25, lssaWeight: 0.15, cannonWeight: 0.20 }
     ];
   }
 
@@ -2710,6 +2710,35 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
       entrySlope: entryRegime ? entryRegime.score : 0,  // positive = bullish
       maxStepGy:  maxStepGy                              // max Y movement per column
     };
+
+    // Pass cannon exhaustion zones as grid-Y ranges so corridor
+    // pathfinding can penalize routing through resistance zones
+    // and favor routing along support zones.
+    if (state.predCannon && typeof _cannonExhaustion !== "undefined" &&
+        _cannonExhaustion && _cannonExhaustion.zones && _cannonExhaustion.zones.length > 0) {
+      var czones = _cannonExhaustion.zones;
+      var gridZones = [];
+      for (var czi = 0; czi < czones.length; czi++) {
+        var cz = czones[czi];
+        // Convert price range to grid-Y range:
+        // gridY = (priceMax - price) / (priceMax - priceMin) * rows
+        var priceRange = priceMax - priceMin;
+        if (priceRange > 0.001) {
+          var gYMin = (priceMax - cz.priceMax) / priceRange * hmRows;
+          var gYMax = (priceMax - cz.priceMin) / priceRange * hmRows;
+          gridZones.push({
+            gyMin:    Math.max(0, Math.min(gYMin, gYMax)),
+            gyMax:    Math.min(hmRows - 1, Math.max(gYMin, gYMax)),
+            type:     cz.type,       // "support" or "resistance"
+            strength: cz.strength
+          });
+        }
+      }
+      if (gridZones.length > 0) {
+        corridorOpts.exhaustionZones = gridZones;
+      }
+    }
+
     corridorData = traceCorridors(topo, entryGx, entryGy, corridorSteps, 15, 30, corridorOpts);
   }
 
@@ -2899,6 +2928,18 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
         if (corrSig < -1) corrSig = -1;
       }
 
+      // ---- CANNON EXHAUSTION SIGNAL ----
+      // Queries momentum exhaustion zones: where do cannon balls
+      // consistently die? Those price levels are where momentum
+      // reverses. Support zones push up, resistance zones push down.
+      var cannonSig = 0;
+      if (state.predCannon && typeof cannonSignal === "function") {
+        var cns = cannonSignal(ss.py, dims, priceMin, priceMax);
+        cannonSig = cns.signal * (0.5 + cns.clarity * 0.5);
+        if (cannonSig > 1) cannonSig = 1;
+        if (cannonSig < -1) cannonSig = -1;
+      }
+
       // ---- LAYERED SIGNAL PIPELINE ----
       // Pass TRAINABLE signals through the trained pipeline:
       //   Specialists (terrain, indicator, energy) →
@@ -2997,9 +3038,11 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
       }
       var ppCorrW = 0;
       var ppLssaW = 0;
-      if (Math.abs(corrSig) > 0.01)  ppCorrW = (sc.corrWeight || 0) * ppConfBoost;
-      if (Math.abs(lssaSig) > 0.01)  ppLssaW = (sc.lssaWeight || 0) * ppConfBoost;
-      var ppTotalW = ppCorrW + ppLssaW;
+      var ppCannonW = 0;
+      if (Math.abs(corrSig) > 0.01)    ppCorrW = (sc.corrWeight || 0) * ppConfBoost;
+      if (Math.abs(lssaSig) > 0.01)    ppLssaW = (sc.lssaWeight || 0) * ppConfBoost;
+      if (Math.abs(cannonSig) > 0.01)  ppCannonW = (sc.cannonWeight || 0) * ppConfBoost;
+      var ppTotalW = ppCorrW + ppLssaW + ppCannonW;
 
       // The pipeline gets the remaining share of the weight budget.
       // Scale by BOTH confidence AND completeness. A pipeline with
@@ -3012,14 +3055,16 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
 
       // Normalize so all weights sum to exactly 1.0
       var ppSumW = ppPipeW + ppTotalW;
-      ppPipeW /= ppSumW;
-      ppCorrW /= ppSumW;
-      ppLssaW /= ppSumW;
+      ppPipeW    /= ppSumW;
+      ppCorrW    /= ppSumW;
+      ppLssaW    /= ppSumW;
+      ppCannonW  /= ppSumW;
 
       // Weighted average: signal stays within -1..+1 range
-      signal = signal  * ppPipeW
-             + corrSig * ppCorrW
-             + lssaSig * ppLssaW;
+      signal = signal    * ppPipeW
+             + corrSig   * ppCorrW
+             + lssaSig   * ppLssaW
+             + cannonSig * ppCannonW;
 
       // Safety clamp: weighted average should stay in -1..+1 but
       // protect against numerical edge cases.
@@ -3508,12 +3553,63 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
       var dst = allTips[dstTipIdx];
 
       // Build sight lines from every prior tip to this virtual candle.
-      // These beams should behave identically to real candle beams.
-      // If the prediction is realistic (zigzag), the virtual candle
-      // bodies will occlude each other and naturally limit brightness.
-      // If the prediction is unrealistic (monotonic), the beams will
-      // stack into a blazing corridor — which the intensity reversal
-      // check uses as a signal to change direction.
+      // Matches the real beam system in sightlines.js + heatmap.js:
+      //
+      //   1. Base sight lines: H-H and L-L connections with occlusion
+      //      check, volume/intensity weight approximation, span boost.
+      //
+      //   2. Extended rays: Only from peaks (H-H) or troughs (L-L),
+      //      collision-walked through occGrid until hitting a candle,
+      //      with beam spread and momentum-based intensity.
+      //
+      // Virtual candles lack real volume and indicator data, so we
+      // use neutral weight values (0.7 — midpoint of 0.4..1.0 range
+      // that the real system produces).
+
+      var vbeamStr = (state.predVBeamStr != null ? state.predVBeamStr : 1.0);
+
+      // ---- Peak/trough detection for ray filtering ----
+      // Recomputed each step as allTips grows. Matches sightlines.js:
+      //   Peak:   tip.h >= both neighbors' highs
+      //   Trough: tip.l <= both neighbors' lows
+      //   Both peak AND trough → disqualify from both
+      //   First/last tips always qualify (no neighbor on one side).
+      var tipCount = allTips.length;
+      var tipIsPeak   = [];
+      var tipIsTrough = [];
+      for (var pti = 0; pti < tipCount; pti++) {
+        var ptPrevH = (pti > 0)             ? allTips[pti - 1].h : -Infinity;
+        var ptNextH = (pti < tipCount - 1)  ? allTips[pti + 1].h : -Infinity;
+        tipIsPeak.push(allTips[pti].h >= ptPrevH && allTips[pti].h >= ptNextH);
+
+        var ptPrevL = (pti > 0)             ? allTips[pti - 1].l : Infinity;
+        var ptNextL = (pti < tipCount - 1)  ? allTips[pti + 1].l : Infinity;
+        tipIsTrough.push(allTips[pti].l <= ptPrevL && allTips[pti].l <= ptNextL);
+      }
+      // Small candle squeezed between bigger ones — not a meaningful
+      // emitter. Same disqualification as sightlines.js.
+      for (var pti2 = 0; pti2 < tipCount; pti2++) {
+        if (tipIsPeak[pti2] && tipIsTrough[pti2]) {
+          tipIsPeak[pti2]   = false;
+          tipIsTrough[pti2] = false;
+        }
+      }
+
+      // ---- Beam spread setup (matches sightlines.js) ----
+      var vbSpreadDeg = state.beamSpread || 0;
+      var vbSpreadRad = vbSpreadDeg * (Math.PI / 180);
+      var vbSubRayCount = vbSpreadDeg < 0.5
+        ? 1
+        : Math.min(1 + Math.round(vbSpreadDeg * 0.8), 15);
+
+      // Neutral weight factors for virtual candles (no real volume
+      // or indicator data). The real system multiplies by:
+      //   srcWeight * (0.4 + volWeight * 0.6) * (0.4 + intWeight * 0.6)
+      // With average vol/int weights ~0.5, that's roughly 1.0 * 0.7 * 0.7 ≈ 0.49.
+      // We use that as a flat multiplier so virtual beams have comparable
+      // brightness to real beams rather than running hotter.
+      var vbNeutralWeight = 0.49;
+
       for (var srcTipIdx = 0; srcTipIdx < dstTipIdx; srcTipIdx++) {
         var src = allTips[srcTipIdx];
         if (src.x >= dst.x) continue;
@@ -3535,22 +3631,81 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
           var hhDy = dst.hy - src.hy;
           var hhLen = Math.sqrt(hhDx * hhDx + hhDy * hhDy);
           if (hhLen > 1) {
-            // Color grid: high side, direction determines green vs yellow
+            // Base sight line intensity: span boost * neutral weights * vol dampen
             var hhGrid = hmGrids[beamGridIdx("h", src.hy, dst.hy)];
             var hhSpan = dstTipIdx - srcTipIdx;
-            var hhInt = (0.5 + Math.min(1.0, hhSpan / 10) * 0.5) * volDampen
-                     * (state.predVBeamStr != null ? state.predVBeamStr : 1.0);
+            var hhInt = (0.5 + Math.min(1.0, hhSpan / 10) * 0.5)
+                      * vbNeutralWeight * volDampen * vbeamStr;
 
-            // Base sight line (src high → dst high)
+            // Paint base sight line (src high → dst high)
             realPaintBeam(hhGrid, src.x, src.hy, dst.x, dst.hy, hhInt, -1);
 
-            // Extended ray: continue past dst along same trajectory
-            var hhNdx = hhDx / hhLen;
-            var hhNdy = hhDy / hhLen;
-            var hhExtX = dst.x + hhNdx * (dims.width - dst.x);
-            var hhExtY = dst.hy + hhNdy * (dims.width - dst.x);
-            var hhRayGrid = hmGrids[beamGridIdx("h", dst.hy, hhExtY)];
-            realPaintBeam(hhRayGrid, dst.x, dst.hy, hhExtX, hhExtY, hhInt, -1);
+            // ---- Extended ray (only from peaks, matching sightlines.js) ----
+            if (tipIsPeak[dstTipIdx]) {
+              var hhBaseAngle = Math.atan2(hhDy, hhDx);
+              var hhNdx = hhDx / hhLen;
+              var hhNdy = hhDy / hhLen;
+
+              // Emit sub-rays across beam spread (1 ray if spread is off)
+              for (var hhSri = 0; hhSri < vbSubRayCount; hhSri++) {
+                var hhSubAngle;
+                if (vbSubRayCount === 1) {
+                  hhSubAngle = hhBaseAngle;
+                } else {
+                  var hhT = hhSri / (vbSubRayCount - 1);  // 0..1
+                  hhSubAngle = hhBaseAngle + vbSpreadRad * (hhT - 0.5);
+                }
+
+                var hhRndx = Math.cos(hhSubAngle);
+                var hhRndy = Math.sin(hhSubAngle);
+
+                // Spread falloff: center ray full strength, edges dimmer
+                var hhSpreadFO = 1.0;
+                if (vbSubRayCount > 1) {
+                  var hhOC = Math.abs((hhSri / (vbSubRayCount - 1)) - 0.5) * 2;
+                  hhSpreadFO = 1.0 - hhOC * 0.5;  // edge = 50% brightness
+                }
+
+                // Collision-walk: march from dst tip until hitting a candle
+                // in occGrid or leaving the canvas. Matches sightlines.js
+                // step-march behavior.
+                var hhRayStep = 2;
+                var hhRx = dst.x + hhRndx * hhRayStep;
+                var hhRy = dst.hy + hhRndy * hhRayStep;
+                var hhExtDist = 0;
+                var hhMaxDist = Math.sqrt(dims.width * dims.width
+                              + (dims.height || chartH) * (dims.height || chartH));
+
+                while (hhExtDist < hhMaxDist) {
+                  if (hhRx < 0 || hhRx >= dims.width * 2
+                   || hhRy < 0 || hhRy >= (dims.height || chartTop + chartH)) break;
+
+                  // Check occGrid for collision with a different candle
+                  var hhGx = (hhRx / resolution) | 0;
+                  var hhGy = (hhRy / resolution) | 0;
+                  if (hhGx >= 0 && hhGx < hmCols && hhGy >= 0 && hhGy < hmRows) {
+                    var hhOccVal = occGrid[hhGy * hmCols + hhGx];
+                    // Hit a candle that isn't our dst virtual candle
+                    if (hhOccVal > 0 && hhOccVal !== vcOccId) break;
+                  }
+
+                  hhRx += hhRndx * hhRayStep;
+                  hhRy += hhRndy * hhRayStep;
+                  hhExtDist += hhRayStep;
+                }
+
+                // Only paint if the ray traveled some distance
+                if (hhExtDist > 2) {
+                  // Momentum-based intensity (matches sightlines.js ray formula):
+                  //   (0.4 + momNorm * 0.8) * spreadFalloff * weight
+                  var hhMomNorm = Math.min(1.0, hhExtDist / 200);
+                  var hhRayInt = (0.4 + hhMomNorm * 0.8)
+                              * hhSpreadFO * volDampen * vbeamStr;
+                  var hhRayGrid = hmGrids[beamGridIdx("h", dst.hy, hhRy)];
+                  realPaintBeam(hhRayGrid, dst.x, dst.hy, hhRx, hhRy, hhRayInt, -1);
+                }
+              }
+            }
           }
         }
 
@@ -3573,19 +3728,69 @@ function buildProjection(hmData, resolution, candles, dims, projDims, priceMin, 
           if (llLen > 1) {
             var llGrid = hmGrids[beamGridIdx("l", src.ly, dst.ly)];
             var llSpan = dstTipIdx - srcTipIdx;
-            var llInt = (0.5 + Math.min(1.0, llSpan / 10) * 0.5) * volDampen
-                     * (state.predVBeamStr != null ? state.predVBeamStr : 1.0);
+            var llInt = (0.5 + Math.min(1.0, llSpan / 10) * 0.5)
+                      * vbNeutralWeight * volDampen * vbeamStr;
 
-            // Base sight line (src low → dst low)
+            // Paint base sight line (src low → dst low)
             realPaintBeam(llGrid, src.x, src.ly, dst.x, dst.ly, llInt, -1);
 
-            // Extended ray
-            var llNdx = llDx / llLen;
-            var llNdy = llDy / llLen;
-            var llExtX = dst.x + llNdx * (dims.width - dst.x);
-            var llExtY = dst.ly + llNdy * (dims.width - dst.x);
-            var llRayGrid = hmGrids[beamGridIdx("l", dst.ly, llExtY)];
-            realPaintBeam(llRayGrid, dst.x, dst.ly, llExtX, llExtY, llInt, -1);
+            // ---- Extended ray (only from troughs, matching sightlines.js) ----
+            if (tipIsTrough[dstTipIdx]) {
+              var llBaseAngle = Math.atan2(llDy, llDx);
+              var llNdx = llDx / llLen;
+              var llNdy = llDy / llLen;
+
+              for (var llSri = 0; llSri < vbSubRayCount; llSri++) {
+                var llSubAngle;
+                if (vbSubRayCount === 1) {
+                  llSubAngle = llBaseAngle;
+                } else {
+                  var llT = llSri / (vbSubRayCount - 1);
+                  llSubAngle = llBaseAngle + vbSpreadRad * (llT - 0.5);
+                }
+
+                var llRndx = Math.cos(llSubAngle);
+                var llRndy = Math.sin(llSubAngle);
+
+                var llSpreadFO = 1.0;
+                if (vbSubRayCount > 1) {
+                  var llOC = Math.abs((llSri / (vbSubRayCount - 1)) - 0.5) * 2;
+                  llSpreadFO = 1.0 - llOC * 0.5;
+                }
+
+                // Collision-walk from dst low tip
+                var llRayStep = 2;
+                var llRx = dst.x + llRndx * llRayStep;
+                var llRy = dst.ly + llRndy * llRayStep;
+                var llExtDist = 0;
+                var llMaxDist = Math.sqrt(dims.width * dims.width
+                              + (dims.height || chartH) * (dims.height || chartH));
+
+                while (llExtDist < llMaxDist) {
+                  if (llRx < 0 || llRx >= dims.width * 2
+                   || llRy < 0 || llRy >= (dims.height || chartTop + chartH)) break;
+
+                  var llGx = (llRx / resolution) | 0;
+                  var llGy = (llRy / resolution) | 0;
+                  if (llGx >= 0 && llGx < hmCols && llGy >= 0 && llGy < hmRows) {
+                    var llOccVal = occGrid[llGy * hmCols + llGx];
+                    if (llOccVal > 0 && llOccVal !== vcOccId) break;
+                  }
+
+                  llRx += llRndx * llRayStep;
+                  llRy += llRndy * llRayStep;
+                  llExtDist += llRayStep;
+                }
+
+                if (llExtDist > 2) {
+                  var llMomNorm = Math.min(1.0, llExtDist / 200);
+                  var llRayInt = (0.4 + llMomNorm * 0.8)
+                              * llSpreadFO * volDampen * vbeamStr;
+                  var llRayGrid = hmGrids[beamGridIdx("l", dst.ly, llRy)];
+                  realPaintBeam(llRayGrid, dst.x, dst.ly, llRx, llRy, llRayInt, -1);
+                }
+              }
+            }
           }
         }
       }
@@ -4536,13 +4741,21 @@ function renderProjection(projData, dims, projDims, priceMin, priceMax) {
   }
 
   // ---- Accuracy sparkline chart ----
-  // Anchored to visible viewport bottom so it's always on screen.
+  // Anchored below the header block at the top of the projection zone
+  // so it's always clearly visible (previously at the bottom where it
+  // was often obscured by other overlays).
   var accHist = projData.accuracyHistory;
+
+  // Vertical start for accuracy section: below the last header item.
+  // Volatility warning (when shown) ends at ~visTop + 66*invS;
+  // add a gap so the sparkline sits comfortably below it.
+  var accSectionTop = visTop + 78 * invS;
+
   if (accHist && accHist.length >= 3) {
     var chartW2 = Math.min(projDims.projWidth - 20, 250);
     var chartH2 = 40;
     var chartX2 = projLeft + (projDims.projWidth - chartW2) / 2;
-    var chartY2 = visBot - 70 * invS;
+    var chartY2 = accSectionTop + 12 * invS;  // gap for title text above
 
     // Background
     ctx.fillStyle = "rgba(0,0,0,0.3)";
@@ -4630,12 +4843,15 @@ function renderProjection(projData, dims, projDims, priceMin, priceMax) {
     ctx.textAlign = "center";
     ctx.fillText("direction accuracy — " + hLen + " predictions",
                  chartX2 + chartW2 / 2, chartY2 - 5 * invS);
+
+    // Move accSectionTop past the chart for stats below
+    accSectionTop = chartY2 + chartH2 + 6 * invS;
   }
 
-  // ---- Simple accuracy stats ----
+  // ---- Simple accuracy stats (below sparkline, or below header if no sparkline) ----
   var acc = projData.accuracy;
   if (acc) {
-    var accY = visBot - 6 * invS;
+    var accY = accSectionTop + 10 * invS;
 
     var fc = acc.firstCandleDirRate;
     var fcColor;

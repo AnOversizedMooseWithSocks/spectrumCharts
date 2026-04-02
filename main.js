@@ -74,10 +74,12 @@ function drawCrosshair() {
   if (visLeftWorld < dims.chartLeft) visLeftWorld = dims.chartLeft;
   if (visRightWorld > dims.width) visRightWorld = dims.width;
 
-  // Bounds check: the crosshair works anywhere in the world that has
-  // chart data (the full world area, not just the screen-sized portion).
-  if (mx < dims.chartLeft || mx > dims.width - 10) return;
-  if (my < dims.chartTop  || my > dims.chartTop + dims.chartHeight) return;
+  // Bounds check: cursor must be within the visible chart area.
+  // Use the clamped visible viewport edges so the crosshair works
+  // correctly at all zoom levels (the old dims.width-10 bound
+  // could reject valid positions near screen edges at zoom < 1.0).
+  if (mx < visLeftWorld || mx > visRightWorld) return;
+  if (my < visTopWorld  || my > visBotWorld)   return;
 
   ctx.save();
   ctx.globalAlpha = 1.0;  // ensure full visibility — prior rendering may leave alpha low
@@ -1183,6 +1185,10 @@ function drawFrame() {
       );
     }
 
+    // --- CANDLE CANNONS (fun mode) ---
+    // Pre-computed trajectories, drawn as static geometry. No per-frame physics.
+    updateAndDrawCannons(candles, dims, range.priceMin, range.priceMax);
+
     // --- INDICATOR OVERLAYS (MA, RSI, LSR lines) ---
     if (state.showMA || state.showRSI || state.showLSR) {
       drawIndicatorOverlays(candles, dims, range.priceMin, range.priceMax);
@@ -1192,6 +1198,14 @@ function drawFrame() {
     if (projData && projDims) {
       if (isCalibrated) {
         renderProjection(projData, dims, projDims, range.priceMin, range.priceMax);
+
+        // --- PROJECTION CANNONS ---
+        // Fire cannons from prediction line peaks/valleys, colliding with
+        // both real and virtual candle bodies. Visualizes S/R through the
+        // projection zone and feeds exhaustion zones into cannonSignal().
+        if (typeof updateAndDrawProjectionCannons === "function") {
+          updateAndDrawProjectionCannons(projData, candles, dims, range.priceMin, range.priceMax);
+        }
       } else {
         // Show the projection zone background but with a hint
         // that calibration is needed. Keeps the zone visible so
@@ -1860,10 +1874,8 @@ async function fetchLive() {
   // so the chart is fully ready on first render.
   preprocessChart(function() {
     if (success) {
-      var bgCount = backgroundData.SOL ? backgroundData.SOL.length : 0;
-      var label = isMultiRes ? "30d Multi-Res (15m→1h→4h)" : rangeInfo.label;
-      statusEl.textContent = "Binance: " + CONFIG.CANDLE_COUNT
-        + " candles (" + label + ") + " + bgCount + " bg " + bgLabel;
+      var label = isMultiRes ? "30d multi-res" : rangeInfo.label;
+      statusEl.textContent = CONFIG.CANDLE_COUNT + " candles (" + label + ") — ready";
       statusEl.style.color = "#00c080";
     }
     drawFrame();
@@ -2390,17 +2402,15 @@ async function cgFetchOneAssetCandles(assetKey, cgRange, isMultiRes, statusEl, s
   if (!coinId) return false;
 
   if (isMultiRes) {
-    if (!silent) showLoading("Fetching " + assetKey + " (multi-res CG)…");
+    if (!silent) showLoading("Fetching " + assetKey + "…");
 
-    statusEl.textContent = "Fetching " + assetKey + " (4h layer)...";
+    statusEl.textContent = "Fetching " + assetKey + "...";
     var layer4h = await cgFetchCandles(coinId, 30, 4 * 60 * 60000);
     await cgDelay();
 
-    statusEl.textContent = "Fetching " + assetKey + " (1h layer)...";
     var layer1h = await cgFetchCandles(coinId, 7, 60 * 60000);
     await cgDelay();
 
-    statusEl.textContent = "Fetching " + assetKey + " (15m layer)...";
     var layerFine = await cgFetchCandles(coinId, 1, 15 * 60000);
     await cgDelay();
 
@@ -2457,23 +2467,20 @@ async function cgFetchOneAssetBg(assetKey, cgRange, isMultiRes, statusEl, silent
   var bgWeekly = null, bgDaily = null, bgFourH = null, bgOneH = null;
 
   if (needBgWeekly) {
-    statusEl.textContent = "Fetching " + assetKey + " weekly bg...";
     bgWeekly = await cgFetchCandlesLight(coinId, 365, 7 * 24 * 60 * 60000);
     await cgDelay();
   }
   if (needBgDaily) {
-    statusEl.textContent = "Fetching " + assetKey + " daily bg...";
     if (!silent) showLoading("Fetching " + assetKey + " background…");
+    statusEl.textContent = "Fetching " + assetKey + " background...";
     bgDaily = await cgFetchCandlesLight(coinId, 90, 24 * 60 * 60000);
     await cgDelay();
   }
   if (needBg4h) {
-    statusEl.textContent = "Fetching " + assetKey + " 4h bg...";
     bgFourH = await cgFetchCandlesLight(coinId, 30, 4 * 60 * 60000);
     await cgDelay();
   }
   if (needBg1h) {
-    statusEl.textContent = "Fetching " + assetKey + " 1h bg...";
     bgOneH = await cgFetchCandlesLight(coinId, 7, 60 * 60000);
     await cgDelay();
   }
@@ -2557,25 +2564,10 @@ function cgClearAndRedraw(statusText, statusColor, callback) {
 
 
 // Build the status text for the CoinGecko data display.
+// Keep it short — the user just needs to know it's done.
 function cgStatusText(assetKey, cgRange, isMultiRes) {
-  var bgCount = backgroundData[assetKey] ? backgroundData[assetKey].length : 0;
-  var viewTargetMs = isMultiRes ? 15 * 60000 : cgRange.targetMs;
-  var needBg1h    = (viewTargetMs <= 15 * 60000);
-  var needBg4h    = needBg1h || (viewTargetMs <= 60 * 60000);
-  var needBgDaily = needBg1h || needBg4h || (viewTargetMs <= 4 * 60 * 60000);
-  var needBgWeekly = (viewTargetMs >= 24 * 60 * 60000);
-
-  var bgLayers = [];
-  if (needBg1h)     bgLayers.push("1h");
-  if (needBg4h)     bgLayers.push("4h");
-  if (needBgDaily)  bgLayers.push("daily");
-  if (needBgWeekly) bgLayers.push("weekly");
-  var bgLabel = bgLayers.join("+") || "daily";
-
-  var label = isMultiRes ? "30d Multi-Res (15m→1h→4h)" : cgRange.label;
-  return "CoinGecko: " + CONFIG.CANDLE_COUNT
-    + " candles (" + label + ")"
-    + (bgCount > 0 ? " + " + bgCount + " bg " + bgLabel : "");
+  var label = isMultiRes ? "30d multi-res" : cgRange.label;
+  return CONFIG.CANDLE_COUNT + " candles (" + label + ")";
 }
 
 
@@ -2605,9 +2597,9 @@ async function fetchLiveCoinGecko() {
     return;
   }
 
-  statusEl.textContent = "Fetching from CoinGecko...";
+  statusEl.textContent = "Fetching...";
   statusEl.style.color = "#5af";
-  showLoading("Fetching CoinGecko data…");
+  showLoading("Fetching data…");
 
   var isMultiRes = (rawRange === "multi");
 
@@ -2677,7 +2669,7 @@ async function cgFetchRemainingAssets(primaryAsset, cgRange, isMultiRes) {
   // Restore status to show all data is loaded
   var primaryStatus = cgStatusText(primaryAsset, cgRange, isMultiRes);
   if (statusEl) {
-    statusEl.textContent = primaryStatus + " (all assets ready)";
+    statusEl.textContent = primaryStatus + " — ready";
     statusEl.style.color = "#00c080";
   }
 

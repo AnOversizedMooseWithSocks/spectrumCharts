@@ -183,7 +183,7 @@ function _addPool(colPools, elevation, cols, gx, startY, endY, ref) {
 // Returns an array of route objects: { pools: [...], cost: number }
 // sorted by cost (cheapest first).
 
-function routeThroughPools(scanColumns, topo, entryGy, maxStepGy) {
+function routeThroughPools(scanColumns, topo, entryGy, maxStepGy, exhaustionZones) {
   if (scanColumns.length < 2) return [];
 
   var cols = topo.cols;
@@ -246,7 +246,8 @@ function routeThroughPools(scanColumns, topo, entryGy, maxStepGy) {
                          entryPool.scanGx, entryGy,
                          allPools[fp].scanGx, allPools[fp].gy);
     var distPenalty = (fpYDist / (rows * 0.25 + 1)) * 0.3;
-    adj[0].push({ to: fp, weight: ew + distPenalty });
+    var exhCost = _exhaustionEdgeCost(entryGy, allPools[fp].gy, exhaustionZones);
+    adj[0].push({ to: fp, weight: ew + distPenalty + exhCost });
   }
 
   console.log("[Corridor] Entry edges: " + adj[0].length + " (to " + (connectEnd - colStart[0]) + " pools in first 2 columns)");
@@ -297,6 +298,9 @@ function routeThroughPools(scanColumns, topo, entryGy, maxStepGy) {
           // Mild linear penalty within budget
           w += overBudget * 0.1;
         }
+
+        // Exhaustion zone cost: resistance zones penalized, support zones favored
+        w += _exhaustionEdgeCost(allPools[a].gy, allPools[b].gy, exhaustionZones);
 
         adj[a].push({ to: b, weight: w });
       }
@@ -438,6 +442,48 @@ function routeThroughPools(scanColumns, topo, entryGy, maxStepGy) {
 
 
 // Helper: compute average terrain along a line between two grid points
+// ================================================================
+// EXHAUSTION ZONE EDGE COST
+// ================================================================
+// Given an edge from gridY y1 to y2, returns an additional cost
+// penalty for crossing through cannon exhaustion zones.
+//
+// Resistance zones (blue/upward momentum blocked) ADD cost —
+// corridors should avoid routing through ceilings.
+// Support zones (yellow/downward momentum blocked) SUBTRACT cost —
+// corridors should prefer routing along floors.
+//
+// Returns a value to add to the edge weight (can be negative for support).
+
+function _exhaustionEdgeCost(y1, y2, zones) {
+  if (!zones || zones.length === 0) return 0;
+
+  var yMin = Math.min(y1, y2);
+  var yMax = Math.max(y1, y2);
+  var cost = 0;
+
+  for (var i = 0; i < zones.length; i++) {
+    var z = zones[i];
+    // Check if the edge's Y range overlaps this zone
+    if (yMax < z.gyMin || yMin > z.gyMax) continue;
+
+    // Overlap amount (0..1 of zone height)
+    var overlapTop = Math.max(yMin, z.gyMin);
+    var overlapBot = Math.min(yMax, z.gyMax);
+    var overlapFrac = (overlapBot - overlapTop) / (z.gyMax - z.gyMin + 0.001);
+    var weight = overlapFrac * Math.min(1, z.strength / 5);
+
+    if (z.type === "resistance") {
+      cost += weight * 0.4;   // penalize crossing resistance
+    } else {
+      cost -= weight * 0.15;  // mild bonus for following support
+    }
+  }
+
+  return cost;
+}
+
+
 function _edgeWeight(elevation, cols, rows, ref, x1, y1, x2, y2) {
   var dx = x2 - x1;
   var dy = y2 - y1;
@@ -1166,13 +1212,42 @@ function scoreChainEnergy(topo, chain, options) {
     straightPenalty = Math.max(0, 1.0 - devFraction);
   }
 
+  // ---- Exhaustion zone alignment ----
+  // Paths that sit on support zones get a bonus (lower score).
+  // Paths that cross through resistance zones get a penalty (higher score).
+  // This helps corridors route around momentum ceilings and along floors.
+  var exhaustionScore = 0;
+  var exhZones = options.exhaustionZones;
+  if (exhZones && exhZones.length > 0 && n > 1) {
+    var exhHits = 0;
+    for (var ei = 0; ei < chain.length; ei++) {
+      var eGy = chain[ei].gy;
+      for (var ezi = 0; ezi < exhZones.length; ezi++) {
+        var ez = exhZones[ezi];
+        if (eGy >= ez.gyMin && eGy <= ez.gyMax) {
+          var ezStr = Math.min(1, ez.strength / 5);
+          if (ez.type === "resistance") {
+            exhaustionScore += ezStr;   // penalty for being inside resistance
+          } else {
+            exhaustionScore -= ezStr * 0.5;  // mild bonus for following support
+          }
+          exhHits++;
+        }
+      }
+    }
+    if (exhHits > 0) {
+      exhaustionScore /= n;  // normalize by chain length
+    }
+  }
+
   // Combine: energy is primary, others adjust it
   var compositeScore = energyScore * 1.0            // primary: terrain energy
                      + widthPenalty * 0.25           // narrow corridors penalized
                      + ridgePenalty * 0.40           // ridge crossings heavily penalized
                      + straightPenalty * 0.30        // straight lines penalized
                      - biasScore * 0.15              // bias-aligned paths favored
-                     - momentumScore * 0.20;         // momentum-aligned paths favored
+                     - momentumScore * 0.20          // momentum-aligned paths favored
+                     + exhaustionScore * 0.25;       // exhaustion zones: resistance penalized, support favored
 
   return {
     totalEnergy:    totalEnergy,
@@ -1183,6 +1258,7 @@ function scoreChainEnergy(topo, chain, options) {
     biasScore:      biasScore,
     momentumScore:  momentumScore,
     straightPenalty: straightPenalty,
+    exhaustionScore: exhaustionScore,
     compositeScore: compositeScore
   };
 }
@@ -1235,7 +1311,7 @@ function traceCorridors(topo, entryGx, entryGy, steps, numScouts, spreadPx, opti
   // ---- STEP 2: Graph-route through pools ----
   // Dijkstra finds cheapest paths from entry to far-end pools,
   // respecting the maxStepGy constraint.
-  var routes = routeThroughPools(scanColumns, topo, entryGy, maxStepGy);
+  var routes = routeThroughPools(scanColumns, topo, entryGy, maxStepGy, options.exhaustionZones || null);
 
   console.log("[Corridor] Graph routing: " + routes.length + " diverse routes"
     + (routes.length > 0 ? " (best cost: " + routes[0].cost.toFixed(2)
@@ -1720,7 +1796,10 @@ function traceCorridors(topo, entryGx, entryGy, steps, numScouts, spreadPx, opti
   }
 
   // ---- STEP 6: Score, rank, and apply temporal continuity ----
-  var scoreOpts = { entrySlope: options.entrySlope || 0 };
+  var scoreOpts = {
+    entrySlope: options.entrySlope || 0,
+    exhaustionZones: options.exhaustionZones || null
+  };
 
   // 6a. Score all chains on terrain quality (same as before)
   for (var si = 0; si < chains.length; si++) {

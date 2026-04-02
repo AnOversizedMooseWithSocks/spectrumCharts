@@ -188,6 +188,7 @@
     <span class="toolbar-sep"></span>
 
     <button class="btn active" id="btn-candles" onclick="toggleCandles()" title="Show/hide candlestick chart">◼ Candles</button>
+    <button class="btn" id="btn-cannons" onclick="toggleCannons()" title="Fun mode — little cannons on each candle fire cannonballs at the next candle">💣 Cannons</button>
     <button class="btn active" id="btn-projection" onclick="toggleProjection()" title="Show/hide prediction projection zone">◉ Projection</button>
   </div>
 
@@ -451,6 +452,8 @@
             title="Topology terrain — elevation field guides prediction paths">🗺 Topo</button>
     <button class="btn active" id="btn-pred-corridor" onclick="togglePred('Corridor')" style="font-size:10px; padding:3px 8px;"
             title="FABRIK corridor pathfinder — finds paths of least resistance">🫠 Corridor</button>
+    <button class="btn" id="btn-pred-cannon" onclick="togglePred('Cannon')" style="font-size:10px; padding:3px 8px;"
+            title="Cannon exhaustion zones — momentum dies at these prices, expect reversal">💣 Cannon</button>
     <div class="slider-group" id="color-bias-group" style="margin-left:-4px;">
       <label style="font-size:9px; color:#8892a4; margin-right:2px;">S/R Bias</label>
       <input type="range" style="width:40px; accent-color:#66ccff;" min="0" max="100" step="5" value="25"
@@ -483,7 +486,7 @@
   <!-- ==================== DISPLAY OPTIONS BAR ==================== -->
   <!-- Visualization overlays — separate row so MODEL doesn't wrap. -->
   <div id="pred-display-bar" style="display:none; align-items:center; gap:8px; padding:4px 14px;
-       border-bottom:1px solid rgba(255,255,255,0.06); font-size:11px;">
+       border-bottom:1px solid rgba(255,255,255,0.06); flex-wrap:nowrap; font-size:11px; overflow-x:auto;">
     <span class="toolbar-label">DISPLAY</span>
     <button class="btn" id="btn-contours" onclick="toggleContours()" style="font-size:10px; padding:3px 8px;"
             title="Topographic contour lines — shows elevation ridges and valleys">◎ Contours</button>
@@ -493,6 +496,8 @@
             title="Corridor paths — colored dashed lines showing paths of least resistance">🫠 Corridors</button>
     <button class="btn active" id="btn-proj-info" onclick="toggleProjInfo()" style="font-size:10px; padding:3px 8px;"
             title="Projection text overlay — direction, target price, confidence, accuracy stats">ℹ Proj Info</button>
+    <button class="btn" id="btn-cannon-zones" onclick="toggleCannonZones()" style="font-size:10px; padding:3px 8px;"
+            title="Cannon exhaustion zones — horizontal bands where momentum consistently dies">💣 Exhaustion</button>
   </div>
 
   <div id="canvas-wrap">
@@ -528,6 +533,7 @@
   <script src="particles.js"></script>    <!-- terrain flow physics + 2D fallback -->
   <script src="projection.js"></script>   <!-- multi-path prediction engine -->
   <script src="ui.js"></script>           <!-- event handlers, toolbar/legend updates -->
+  <script src="cannons.js"></script>      <!-- fun mode: candle cannons firing cannonballs -->
   <script src="main.js"></script>         <!-- drawFrame, animation, resize, fetch, init -->
 
   <!-- GPU particle system (50K particles, 2D canvas renderer).

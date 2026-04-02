@@ -257,6 +257,24 @@ function toggleCorridorViz() {
   drawFrame();
 }
 
+// Toggle the silly cannon mode — little cannons fire cannonballs between candles
+function toggleCannons() {
+  state.showCannons = !state.showCannons;
+  if (!state.showCannons && !state.showCannonZones && !state.predCannon) {
+    // Clear cache only when ALL cannon features are off
+    initCannonballs();
+  }
+  updateToolbar();
+  drawFrame();
+}
+
+// Toggle cannon exhaustion zone bands (visual only, separate from signal)
+function toggleCannonZones() {
+  state.showCannonZones = !state.showCannonZones;
+  updateToolbar();
+  drawFrame();
+}
+
 // Toggle projection info text overlay (direction, target, accuracy, etc.)
 function toggleProjInfo() {
   state.showProjInfo = !state.showProjInfo;
@@ -380,6 +398,7 @@ function updateToolbar() {
   }
   setActive("btn-pred-topo",    state.predTopo);
   setActive("btn-pred-corridor", state.predCorridor);
+  setActive("btn-pred-cannon",   state.predCannon);
   setActive("btn-pred-intrev",   state.predIntRev);
   setActive("btn-pred-minstep",  state.predMinStep);
 
@@ -398,9 +417,18 @@ function updateToolbar() {
   if (corrVizBtn) {
     setActive("btn-corridors", state.showCorridors);
   }
+  var cannonBtn = document.getElementById("btn-cannons");
+  if (cannonBtn) {
+    setActive("btn-cannons", state.showCannons);
+    cannonBtn.textContent = state.showCannons ? "💣 Cannons" : "💣 Cannons";
+  }
   var projInfoBtn = document.getElementById("btn-proj-info");
   if (projInfoBtn) {
     setActive("btn-proj-info", state.showProjInfo);
+  }
+  var cannonZoneBtn = document.getElementById("btn-cannon-zones");
+  if (cannonZoneBtn) {
+    setActive("btn-cannon-zones", state.showCannonZones);
   }
 
   // Show/hide raycast-specific controls (only in raycast mode)
