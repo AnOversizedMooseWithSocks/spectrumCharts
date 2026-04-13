@@ -272,13 +272,25 @@
     <span class="toolbar-sep"></span>
     <span class="toolbar-label">SOURCE</span>
     <select id="data-source-select" onchange="onDataSourceChange()"
-            title="Choose between Binance and CoinGecko market data"
+            title="Choose market data source"
             style="background:rgba(255,255,255,0.06); color:#8892a4;
             border:1px solid rgba(255,255,255,0.12); border-radius:4px; padding:4px 8px;
             font-family:inherit; font-size:11px;">
       <option value="binance" selected>Binance</option>
       <option value="coingecko">CoinGecko</option>
+      <option value="yahoo">Yahoo Finance (stocks/ETFs)</option>
     </select>
+
+    <!-- Ticker input — shown only for Yahoo -->
+    <span id="yahoo-ticker-area" style="display:none; align-items:center; gap:6px;">
+      <input id="yahoo-ticker-input" type="text" value="SPY" 
+         style="background:rgba(255,255,255,0.06); color:#8892a4;
+         border:1px solid rgba(255,255,255,0.12); border-radius:4px; padding:4px 8px;
+         font-family:inherit; font-size:13px; width:90px; text-transform:uppercase;"
+         placeholder="SPY" onkeydown="if(event.key==='Enter') fetchLiveRouter();">
+  <button class="btn" onclick="fetchLiveRouter()" 
+          style="font-size:11px; padding:4px 10px;">Load</button>
+    </span>
     <!-- CoinGecko API key input — hidden by default, shown when CG is selected -->
     <span id="cg-key-area" style="display:none;">
       <input id="cg-key-input" type="password" placeholder="Demo API key"
