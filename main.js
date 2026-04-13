@@ -1431,7 +1431,56 @@ var RANGE_MAP = {
   "90":     { interval: "1d",  limit: 90,   label: "90d × 1d" },
 };
 
+// ================================================================
+// YAHOO FINANCE (STOCKS/ETFs) SUPPORT
+// ================================================================
+// Public endpoint, no key required, CORS-friendly.
+// Maps our existing RANGE selector to Yahoo-compatible params.
 
+const YAHOO_RANGE_MAP = {
+  "1":      { interval: "5m",  range: "1d" },
+  "1-15m":  { interval: "15m", range: "1d" },
+  "multi":  { interval: "15m", range: "5d" },   // multi-res fallback
+  "7-1h":   { interval: "1h",  range: "7d" },
+  "7":      { interval: "4h",  range: "7d" },
+  "14-1h":  { interval: "1h",  range: "14d" },
+  "14":     { interval: "4h",  range: "14d" },
+  "30":     { interval: "4h",  range: "1mo" },
+  "90":     { interval: "1d",  range: "3mo" },
+};
+
+async function fetchYahooCandles(ticker) {
+  const rangeKey = document.getElementById("interval-select").value;
+  const map = YAHOO_RANGE_MAP[rangeKey] || { interval: "5m", range: "1d" };
+  
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=${map.range}&interval=${map.interval}&includePrePost=false`;
+  
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Yahoo fetch failed");
+  
+  const json = await res.json();
+  const result = json.chart.result[0];
+  if (!result) throw new Error("No data from Yahoo");
+
+  const timestamps = result.timestamp;
+  const q = result.indicators.quote[0];
+
+  const candles = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    if (!q.open[i] || isNaN(q.open[i])) continue;
+    candles.push({
+      o: +q.open[i].toFixed(2),
+      h: +q.high[i].toFixed(2),
+      l: +q.low[i].toFixed(2),
+      c: +q.close[i].toFixed(2),
+      v: Math.round(q.volume[i] || 0),
+      buyPressure: 0.5,                    // stocks don't have taker-buy split
+      trades: 0,
+      time: timestamps[i] * 1000,
+    });
+  }
+  return candles;
+}
 // ================================================================
 // LOCALSTORAGE PERSISTENCE
 // ================================================================
@@ -2789,8 +2838,7 @@ async function cgAutoRefreshCheck() {
 // ================================================================
 // FETCH ROUTER
 // ================================================================
-// Called by the Fetch Live button. Routes to Binance or CoinGecko
-// based on the data source selector.
+// Called by the Fetch Live button. Now routes Binance / CoinGecko / Yahoo
 
 function fetchLiveRouter() {
   var srcEl = document.getElementById("data-source-select");
@@ -2798,8 +2846,55 @@ function fetchLiveRouter() {
 
   if (source === "coingecko") {
     fetchLiveCoinGecko();
+  } else if (source === "yahoo") {
+    var tickerInput = document.getElementById("yahoo-ticker-input").value.trim().toUpperCase();
+    if (!tickerInput) {
+      alert("Enter a ticker (e.g. SPY)");
+      return;
+    }
+    state.asset = tickerInput;           // reuse existing state.asset for the new ticker
+    fetchLiveYahoo(tickerInput);
   } else {
-    fetchLive();
+    fetchLive();                         // original Binance
+  }
+}
+
+// ================================================================
+// YAHOO FINANCE FETCHER
+// ================================================================
+
+async function fetchLiveYahoo(ticker) {
+  var statusEl = document.getElementById("data-status");
+  if (statusEl) {
+    statusEl.textContent = `Fetching ${ticker}...`;
+    statusEl.style.color = "#ff0";
+  }
+  hideLoading();
+
+  try {
+    var candles = await fetchYahooCandles(ticker);
+    if (candles.length < 10) throw new Error("Not enough data");
+
+    candleData[ticker] = candles;
+    CONFIG.CANDLE_COUNT = candles.length;
+
+    // Precompute for animation
+    animPrecomputed[ticker] = {
+      pairs: precomputeVisibilityPairs(candles),
+      candles: candles
+    };
+
+    if (statusEl) {
+      statusEl.textContent = `${ticker} loaded (${candles.length} candles)`;
+      statusEl.style.color = "#00c080";
+    }
+    drawFrame();
+  } catch (e) {
+    console.error(e);
+    if (statusEl) {
+      statusEl.textContent = `Error loading ${ticker}`;
+      statusEl.style.color = "#f66";
+    }
   }
 }
 
