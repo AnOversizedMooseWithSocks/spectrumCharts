@@ -616,3 +616,30 @@ function updateZoomIndicator() {
     levelEl.textContent = state.viewScale.toFixed(1) + "×";
   }
 }
+
+// ================================================================
+// NEW: Data source UI handler
+// ================================================================
+function onDataSourceChange() {
+  const src = document.getElementById("data-source-select").value;
+  const yahooArea = document.getElementById("yahoo-ticker-area");
+  
+  if (src === "yahoo") {
+    yahooArea.style.display = "flex";
+    // Disable multi-asset for stocks (only one ticker at a time)
+    if (state.multiAsset) toggleOverlay();
+  } else {
+    yahooArea.style.display = "none";
+  }
+  
+  // Clear old data when source changes
+  candleData = {};
+  heatmapCache = {};
+  sightLineCache = {};
+  particles = {};
+}
+
+function loadCustomTicker() {
+  // Called by the Load button or Enter key
+  fetchLiveRouter();
+}
