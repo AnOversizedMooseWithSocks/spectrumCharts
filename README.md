@@ -1,4 +1,4 @@
-# Spectrum — Crypto Pressure Field Visualizer
+# Spectrum — Crypto & Stock Pressure Field Visualizer
 
 A physics-based crypto chart analysis tool that treats candlestick data as light sources. Candle highs and lows emit beams of light; candle bodies and wicks act as translucent obstacles that cast shadows. The result is a pressure field where bright zones reveal support/resistance and dark zones reveal paths of least resistance.
 
@@ -13,7 +13,8 @@ Built with vanilla JavaScript. No frameworks, no build step. Open `index.html` i
    ```
 2. Open `http://localhost:8080` in your browser.
 3. Click **⟳ Fetch Live** to load real market data.
-4. Click **▶ Play** to watch the chart build up candle-by-candle and calibrate the prediction engine.
+4. Now supports **stocks & ETFs** (SPY, AAPL, etc.) via the new Yahoo Finance source!
+5. Click **▶ Play** to watch the chart build up candle-by-candle and calibrate the prediction engine.
 
 The tool opens with generated sample data. Fetch Live pulls real candles from Binance (default) or CoinGecko (if you provide a free API key).
 
@@ -39,22 +40,38 @@ CoinGecko provides aggregated price data from many exchanges. The tool fetches r
 
 Rate limit: 30 calls/minute on the free tier. The tool spaces requests 2.2 seconds apart to stay within limits.
 
+### Yahoo Finance (Stocks & ETFs) — NEW
+
+No API key required. Fully CORS-friendly public endpoint.
+
+**How to use:**
+1. Change **SOURCE** dropdown to **Yahoo Finance (stocks/ETFs)**.
+2. Type any ticker (e.g. `SPY`, `AAPL`, `QQQ`, `NVDA`, `TSLA`) in the new input box.
+3. Hit **Load** (or press Enter).
+
+The ticker input appears automatically when Yahoo is selected.  
+Multi-asset overlay is disabled for stocks (one ticker at a time).  
+
+All visualization modes (Raycast, Wind Tunnel, Sight Lines, Projection Engine) work exactly the same. The only difference is that stocks use aggregated OHLCV data (no native taker-buy/sell split, so `buyPressure` defaults to 0.5).
+
+Works for any valid Yahoo ticker symbol (U.S. stocks, ETFs, even some international). Real-time/delayed last price is shown in the top bar.
+
 ### Range Selector
 
 The **RANGE** dropdown controls how much history to fetch and at what candle interval:
 
-| Range | Binance | CoinGecko |
-|---|---|---|
-| 24h (5m candles) | Native 5m | Synthesized from ~5min price points |
-| 24h (15m candles) | Native 15m | Synthesized from ~5min price points |
-| 7d (1h candles) | Native 1h | Synthesized from hourly price points |
-| 7d (4h candles) | Native 4h | Synthesized from hourly price points |
-| 14d (1h / 4h) | Native | Synthesized from hourly points |
-| 30d (4h candles) | Native 4h | Synthesized from hourly points |
-| 30d Multi-Res | 15m→1h→4h stitched | 15m→1h→4h stitched |
-| 90d (daily) | Native daily | Synthesized from daily points |
+| Range              | Binance (crypto)          | CoinGecko (crypto)               | Yahoo Finance (stocks/ETFs)      |
+|--------------------|---------------------------|----------------------------------|----------------------------------|
+| 24h (5m candles)   | Native 5m                 | Synthesized                      | 5m interval                      |
+| 24h (15m candles)  | Native 15m                | Synthesized                      | 15m interval                     |
+| 7d (1h candles)    | Native 1h                 | Synthesized                      | 1h interval                      |
+| 7d (4h candles)    | Native 4h                 | Synthesized                      | 4h / 1h interval                 |
+| 14d (1h / 4h)      | Native                    | Synthesized                      | 1h / 4h                          |
+| 30d (4h candles)   | Native 4h                 | Synthesized                      | 4h interval                      |
+| 30d Multi-Res      | 15m→1h→4h stitched        | 15m→1h→4h stitched               | 15m→1h→4h stitched               |
+| 90d (daily)        | Native daily              | Synthesized                      | 1d interval                      |
 
-Multi-Res stitches three layers: recent data at fine resolution, mid-range at medium, and older data at coarse — giving you both granular detail near the current price and broad context going back a month.
+Multi-Res stitches three layers for the best of both worlds on every data source.
 
 ### Background Data
 
